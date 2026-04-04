@@ -1,6 +1,12 @@
+import { redirect } from "next/navigation";
 import FlyerUpload from "@/components/FlyerUpload";
+import { isAdmin } from "@/lib/admin";
 
-export default function UploadPage() {
+export default async function UploadPage() {
+  if (!(await isAdmin())) {
+    redirect("/admin");
+  }
+
   return (
     <div className="space-y-6">
       <div>

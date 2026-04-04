@@ -4,6 +4,7 @@ import { storage } from "@/lib/storage/json-storage";
 import { generateRecipes } from "@/lib/anthropic/generate-recipes";
 import { getCurrentWeekMonday } from "@/lib/week";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isAdmin } from "@/lib/admin";
 import type { Recipe, Deal } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +18,14 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
+  // Admin-only: only authenticated admins can generate recipes
+  if (!(await isAdmin())) {
+    return NextResponse.json(
+      { error: "Endast administratörer kan generera recept." },
+      { status: 403 }
+    );
+  }
+
   // Rate limit recipe generation (expensive API call)
   const ip = getClientIp(request);
   const rateCheck = checkRateLimit(ip, 5, 60 * 60 * 1000); // 5 per hour

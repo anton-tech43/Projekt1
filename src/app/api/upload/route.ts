@@ -4,6 +4,7 @@ import { validateFile, validateImageDimensions } from "@/lib/processing/validate
 import { prepareImageForVision } from "@/lib/processing/image-resize";
 import { extractDealsFromImage } from "@/lib/anthropic/extract-deals";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
+import { isAdmin } from "@/lib/admin";
 import { storage } from "@/lib/storage/json-storage";
 import { getCurrentWeekMonday } from "@/lib/week";
 import type { StoreId, Deal, WeeklyFlyer } from "@/lib/types";
@@ -16,6 +17,14 @@ const limit = pLimit(2); // Max 2 concurrent Claude API calls
 const VALID_STORES: StoreId[] = ["ica-karrtorp", "coop-karrtorp"];
 
 export async function POST(request: Request) {
+  // Admin-only: only authenticated admins can upload flyers
+  if (!(await isAdmin())) {
+    return NextResponse.json(
+      { error: "Endast administratörer kan ladda upp flygblad." },
+      { status: 403 }
+    );
+  }
+
   // Validate Origin header (CSRF protection)
   const origin = request.headers.get("origin");
   const host = request.headers.get("host");
