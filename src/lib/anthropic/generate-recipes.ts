@@ -28,10 +28,26 @@ Returnera BARA en JSON-array med recept, ingen annan text. Varje recept ska ha:
   "estimatedTotalPrice": 89
 }`;
 
+export type DietaryPreference = "vegetariskt" | "laktosfritt" | "glutenfritt";
+
+const DIETARY_INSTRUCTIONS: Record<DietaryPreference, string> = {
+  vegetariskt: "Alla recept ska vara vegetariska (inget kött eller fisk).",
+  laktosfritt: "Alla recept ska vara laktosfria (inga mejeriprodukter med laktos).",
+  glutenfritt: "Alla recept ska vara glutenfria (inget vete, råg, korn eller vanlig pasta/bröd).",
+};
+
 export async function generateRecipes(
-  deals: Deal[]
+  deals: Deal[],
+  dietary: DietaryPreference[] = []
 ): Promise<GeneratedRecipe[]> {
   const client = getAnthropicClient();
+
+  // Build dietary constraint string
+  let dietaryText = "";
+  if (dietary.length > 0) {
+    const constraints = dietary.map((d) => DIETARY_INSTRUCTIONS[d]);
+    dietaryText = `\n\nKostpreferenser:\n${constraints.join("\n")}`;
+  }
 
   // Build a summary of available deals for the prompt
   const dealsSummary = deals.map((d) => ({
@@ -50,7 +66,7 @@ export async function generateRecipes(
     messages: [
       {
         role: "user",
-        content: `Här är veckans rabatterade produkter:\n\n${JSON.stringify(dealsSummary, null, 2)}\n\nFöreslå 3-5 recept baserade på dessa erbjudanden.`,
+        content: `Här är veckans rabatterade produkter:\n\n${JSON.stringify(dealsSummary, null, 2)}\n\nFöreslå 3-5 recept baserade på dessa erbjudanden.${dietaryText}`,
       },
     ],
   });

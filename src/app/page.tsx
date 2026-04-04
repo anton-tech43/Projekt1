@@ -24,6 +24,27 @@ export default async function HomePage() {
 
   return (
     <div className="space-y-8">
+      {/* New deals banner */}
+      {totalDeals > 0 && (
+        <Link
+          href="/deals"
+          className="block rounded-lg bg-gradient-to-r from-red-500 to-green-600 p-4 text-white hover:opacity-95 transition-opacity"
+        >
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="font-semibold">
+                Veckans erbjudanden är klara!
+              </p>
+              <p className="text-sm text-white/90">
+                {totalDeals} erbjudanden från {[hasIca && "ICA", hasCoop && "Coop"].filter(Boolean).join(" och ")}
+                {recipes.length > 0 && ` + ${recipes.length} receptförslag`}
+              </p>
+            </div>
+            <span className="text-white/80 text-lg">&rarr;</span>
+          </div>
+        </Link>
+      )}
+
       {/* Hero */}
       <div>
         <h1 className="text-3xl font-bold text-gray-900">Matkrig</h1>

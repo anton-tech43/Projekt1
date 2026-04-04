@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import DealCard from "./DealCard";
 import type { Deal } from "@/lib/types";
 import { STORES, type StoreId } from "@/lib/types";
@@ -26,10 +26,76 @@ const TAB_COLORS: Record<string, { active: string; inactive: string }> = {
   },
 };
 
+const CATEGORY_LABELS: Record<string, string> = {
+  meat: "Kött",
+  fish: "Fisk",
+  dairy: "Mejeri",
+  produce: "Frukt & Grönt",
+  bread: "Bröd",
+  pantry: "Skafferi",
+  frozen: "Fryst",
+  drinks: "Dryck",
+  snacks: "Snacks",
+  other: "Övrigt",
+};
+
+/** Normalize product name for comparison */
+function normalizeName(name: string): string {
+  return name.toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+/** Find best-price deal IDs by comparing across stores */
+function findBestPriceIds(stores: StoreDeals[]): Set<string> {
+  if (stores.length < 2) return new Set();
+
+  const bestPriceIds = new Set<string>();
+
+  // Build lookup: normalized name -> deals from different stores
+  const byName = new Map<string, Deal[]>();
+  for (const store of stores) {
+    for (const deal of store.deals) {
+      const key = normalizeName(deal.productName);
+      const list = byName.get(key) ?? [];
+      list.push(deal);
+      byName.set(key, list);
+    }
+  }
+
+  // For products that exist at multiple stores, mark the cheapest
+  for (const deals of byName.values()) {
+    const uniqueStores = new Set(deals.map((d) => d.storeId));
+    if (uniqueStores.size < 2) continue;
+
+    let cheapest = deals[0];
+    for (const d of deals) {
+      if (d.discountPrice < cheapest.discountPrice) cheapest = d;
+    }
+    bestPriceIds.add(cheapest.id);
+  }
+
+  return bestPriceIds;
+}
+
 export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
   const [activeTab, setActiveTab] = useState<string>(
     stores[0]?.storeId ?? "ica-karrtorp"
   );
+  const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+
+  // Find best prices across stores
+  const bestPriceIds = useMemo(() => findBestPriceIds(stores), [stores]);
+
+  // Collect all categories across all stores
+  const allCategories = useMemo(() => {
+    const cats = new Set<string>();
+    for (const s of stores) {
+      for (const d of s.deals) {
+        cats.add(d.category ?? "other");
+      }
+    }
+    return Array.from(cats).sort();
+  }, [stores]);
 
   if (stores.length === 0) {
     return (
@@ -43,7 +109,26 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
     );
   }
 
-  // Group deals by category within each store
+  // Filter deals
+  const filterDeals = (deals: Deal[]) => {
+    let filtered = deals;
+    if (search) {
+      const q = search.toLowerCase();
+      filtered = filtered.filter(
+        (d) =>
+          d.productName.toLowerCase().includes(q) ||
+          d.description?.toLowerCase().includes(q)
+      );
+    }
+    if (categoryFilter) {
+      filtered = filtered.filter(
+        (d) => (d.category ?? "other") === categoryFilter
+      );
+    }
+    return filtered;
+  };
+
+  // Group deals by category
   const groupByCategory = (deals: Deal[]) => {
     const groups: Record<string, Deal[]> = {};
     for (const deal of deals) {
@@ -55,7 +140,8 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
   };
 
   const renderStoreDeals = (storeDeals: StoreDeals) => {
-    const groups = groupByCategory(storeDeals.deals);
+    const filtered = filterDeals(storeDeals.deals);
+    const groups = groupByCategory(filtered);
     const sortedCategories = Object.keys(groups).sort();
 
     return (
@@ -63,13 +149,19 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
         {sortedCategories.map((cat) => (
           <div key={cat} className="space-y-2">
             {groups[cat].map((deal) => (
-              <DealCard key={deal.id} deal={deal} />
+              <DealCard
+                key={deal.id}
+                deal={deal}
+                isBestPrice={bestPriceIds.has(deal.id)}
+              />
             ))}
           </div>
         ))}
-        {storeDeals.deals.length === 0 && (
+        {filtered.length === 0 && (
           <p className="text-sm text-gray-400 text-center py-4">
-            Inga erbjudanden
+            {search || categoryFilter
+              ? "Inga erbjudanden matchar filtret"
+              : "Inga erbjudanden"}
           </p>
         )}
       </div>
@@ -77,7 +169,45 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
   };
 
   return (
-    <>
+    <div className="space-y-4">
+      {/* F6: Search and filter bar */}
+      <div className="flex flex-col sm:flex-row gap-3">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Sök produkt..."
+          className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-gray-900 focus:border-transparent bg-white"
+        />
+        <div className="flex flex-wrap gap-1.5">
+          <button
+            onClick={() => setCategoryFilter(null)}
+            className={`px-2.5 py-1 text-xs rounded-full transition-colors ${
+              !categoryFilter
+                ? "bg-gray-900 text-white"
+                : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+            }`}
+          >
+            Alla
+          </button>
+          {allCategories.map((cat) => (
+            <button
+              key={cat}
+              onClick={() =>
+                setCategoryFilter(categoryFilter === cat ? null : cat)
+              }
+              className={`px-2.5 py-1 text-xs rounded-full transition-colors ${
+                categoryFilter === cat
+                  ? "bg-gray-900 text-white"
+                  : "bg-gray-100 text-gray-600 hover:bg-gray-200"
+              }`}
+            >
+              {CATEGORY_LABELS[cat] ?? cat}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {/* Mobile: tabs */}
       <div className="md:hidden">
         <div className="flex rounded-lg bg-gray-100 p-1 mb-4">
@@ -85,6 +215,7 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
             const storeName =
               STORES[s.storeId as StoreId]?.name ?? s.storeId;
             const colors = TAB_COLORS[s.storeId] ?? TAB_COLORS["ica-karrtorp"];
+            const filteredCount = filterDeals(s.deals).length;
             return (
               <button
                 key={s.storeId}
@@ -93,7 +224,7 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
                   activeTab === s.storeId ? colors.active : colors.inactive
                 }`}
               >
-                {storeName} ({s.deals.length})
+                {storeName} ({filteredCount})
               </button>
             );
           })}
@@ -112,6 +243,7 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
             STORES[s.storeId as StoreId]?.name ?? s.storeId;
           const borderColor =
             STORE_COLORS[s.storeId] ?? "border-gray-300";
+          const filteredCount = filterDeals(s.deals).length;
           return (
             <div key={s.storeId}>
               <h3
@@ -119,7 +251,7 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
               >
                 {storeName}{" "}
                 <span className="text-sm font-normal text-gray-400">
-                  ({s.deals.length} erbjudanden)
+                  ({filteredCount} erbjudanden)
                 </span>
               </h3>
               {renderStoreDeals(s)}
@@ -127,6 +259,6 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
           );
         })}
       </div>
-    </>
+    </div>
   );
 }

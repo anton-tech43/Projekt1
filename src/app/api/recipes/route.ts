@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { nanoid } from "nanoid";
 import { storage } from "@/lib/storage/json-storage";
-import { generateRecipes } from "@/lib/anthropic/generate-recipes";
+import { generateRecipes, type DietaryPreference } from "@/lib/anthropic/generate-recipes";
 import { getCurrentWeekMonday } from "@/lib/week";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { isAdmin } from "@/lib/admin";
@@ -49,8 +49,20 @@ export async function POST(request: Request) {
     );
   }
 
+  // Parse dietary preferences from request body
+  let dietary: DietaryPreference[] = [];
   try {
-    const generated = await generateRecipes(allDeals);
+    const body = await request.json();
+    if (Array.isArray(body.dietary)) {
+      const valid: DietaryPreference[] = ["vegetariskt", "laktosfritt", "glutenfritt"];
+      dietary = body.dietary.filter((d: string) => valid.includes(d as DietaryPreference));
+    }
+  } catch {
+    // No body or invalid JSON - that's fine, use defaults
+  }
+
+  try {
+    const generated = await generateRecipes(allDeals, dietary);
 
     // Convert to Recipe type with IDs
     const recipes: Recipe[] = generated.map((r) => ({
