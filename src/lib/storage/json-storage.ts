@@ -51,6 +51,19 @@ export class JsonStorage implements StorageRepository {
     );
   }
 
+  async getFlyersForWeek(weekOf: string): Promise<WeeklyFlyer[]> {
+    const indexPath = path.join(DATA_DIR, "index.json");
+    const index = (await readJsonFile<Record<string, string[]>>(indexPath)) ?? {};
+    const flyerIds = index[weekOf] ?? [];
+
+    const flyers: WeeklyFlyer[] = [];
+    for (const id of flyerIds) {
+      const flyer = await this.getFlyer(id);
+      if (flyer) flyers.push(flyer);
+    }
+    return flyers;
+  }
+
   async getDealsForWeek(
     weekOf: string
   ): Promise<{ storeId: string; deals: Deal[] }[]> {

@@ -2,16 +2,24 @@
 
 import { useCallback, useState } from "react";
 import { useDropzone } from "react-dropzone";
-import type { Deal, StoreId } from "@/lib/types";
+import { useRouter } from "next/navigation";
+import type { Deal, StoreId, WeeklyFlyer } from "@/lib/types";
+import { STORES } from "@/lib/types";
 
 type UploadState = "idle" | "uploading" | "editing" | "error";
 
-export default function FlyerUpload() {
+interface FlyerUploadProps {
+  existingFlyers?: Pick<WeeklyFlyer, "id" | "storeId" | "uploadedAt" | "fileName" | "deals">[];
+}
+
+export default function FlyerUpload({ existingFlyers = [] }: FlyerUploadProps) {
+  const router = useRouter();
   const [storeId, setStoreId] = useState<StoreId>("ica-karrtorp");
   const [state, setState] = useState<UploadState>("idle");
   const [error, setError] = useState<string>("");
   const [deals, setDeals] = useState<Deal[]>([]);
   const [flyerId, setFlyerId] = useState<string>("");
+  const [deleting, setDeleting] = useState<string | null>(null);
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
@@ -81,8 +89,68 @@ export default function FlyerUpload() {
     setError("");
   };
 
+  const handleDeleteFlyer = async (id: string) => {
+    if (!confirm("Vill du ta bort detta flygblad och alla dess erbjudanden?")) {
+      return;
+    }
+    setDeleting(id);
+    try {
+      const res = await fetch(`/api/flyers/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        router.refresh();
+      } else {
+        const data = await res.json();
+        setError(data.error || "Kunde inte ta bort flygbladet.");
+      }
+    } catch {
+      setError("Kunde inte ansluta till servern.");
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   return (
     <div className="space-y-6">
+      {/* Existing flyers */}
+      {existingFlyers.length > 0 && state === "idle" && (
+        <div className="space-y-3">
+          <h3 className="text-sm font-medium text-gray-700">
+            Uppladdade flygblad denna vecka
+          </h3>
+          {existingFlyers.map((flyer) => (
+            <div
+              key={flyer.id}
+              className="flex items-center justify-between rounded-lg border border-gray-200 bg-white px-4 py-3"
+            >
+              <div>
+                <span
+                  className={`text-sm font-medium ${
+                    flyer.storeId === "ica-karrtorp"
+                      ? "text-red-600"
+                      : "text-green-700"
+                  }`}
+                >
+                  {STORES[flyer.storeId as StoreId]?.name ?? flyer.storeId}
+                </span>
+                <span className="ml-3 text-sm text-gray-500">
+                  {flyer.deals.length} produkter
+                </span>
+                <span className="ml-3 text-xs text-gray-400">
+                  {new Date(flyer.uploadedAt).toLocaleDateString("sv-SE")}
+                </span>
+              </div>
+              <button
+                onClick={() => handleDeleteFlyer(flyer.id)}
+                disabled={deleting === flyer.id}
+                className="text-xs text-red-400 hover:text-red-600 disabled:opacity-50"
+              >
+                {deleting === flyer.id ? "Tar bort..." : "Ta bort"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Store selector */}
       <div className="flex gap-4">
         <label className="flex items-center gap-2 cursor-pointer">

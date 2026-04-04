@@ -3,6 +3,8 @@ import { notFound } from "next/navigation";
 import RecipeDetail from "@/components/RecipeDetail";
 import { storage } from "@/lib/storage/json-storage";
 
+export const dynamic = "force-dynamic";
+
 export default async function RecipeDetailPage({
   params,
 }: {

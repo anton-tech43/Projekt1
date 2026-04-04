@@ -1,11 +1,27 @@
 import { redirect } from "next/navigation";
 import FlyerUpload from "@/components/FlyerUpload";
 import { isAdmin } from "@/lib/admin";
+import { storage } from "@/lib/storage/json-storage";
+import { getCurrentWeekMonday } from "@/lib/week";
+
+export const dynamic = "force-dynamic";
 
 export default async function UploadPage() {
   if (!(await isAdmin())) {
     redirect("/admin");
   }
+
+  const weekOf = getCurrentWeekMonday();
+  const flyers = await storage.getFlyersForWeek(weekOf);
+  const existingFlyers = flyers
+    .filter((f) => f.status === "extracted")
+    .map((f) => ({
+      id: f.id,
+      storeId: f.storeId,
+      uploadedAt: f.uploadedAt,
+      fileName: f.fileName,
+      deals: f.deals,
+    }));
 
   return (
     <div className="space-y-6">
@@ -18,7 +34,7 @@ export default async function UploadPage() {
           AI:n analyserar flygbladet och extraherar alla rabatterade produkter.
         </p>
       </div>
-      <FlyerUpload />
+      <FlyerUpload existingFlyers={existingFlyers} />
     </div>
   );
 }

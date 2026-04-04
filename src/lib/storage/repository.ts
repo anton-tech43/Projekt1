@@ -3,6 +3,7 @@ import type { WeeklyFlyer, Deal, Recipe } from "../types";
 export interface DealRepository {
   saveFlyer(flyer: WeeklyFlyer): Promise<void>;
   getFlyer(id: string): Promise<WeeklyFlyer | null>;
+  getFlyersForWeek(weekOf: string): Promise<WeeklyFlyer[]>;
   getDealsForWeek(weekOf: string): Promise<{ storeId: string; deals: Deal[] }[]>;
   deleteFlyer(id: string): Promise<void>;
 }
