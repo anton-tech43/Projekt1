@@ -22,6 +22,9 @@ export interface Deal {
   discountPrice: number;
   originalPrice?: number;
   unit?: string;
+  weight?: string; // "500g", "1kg", "750ml", etc.
+  comparisonPrice?: number; // jämförpris per kg/l for fair comparison
+  comparisonUnit?: string; // "kr/kg", "kr/l", "kr/st"
   description?: string; // "3 för 2", "halvpris", etc.
   category?: string;
   weekOf: string; // ISO date of Monday, e.g. "2026-03-30"

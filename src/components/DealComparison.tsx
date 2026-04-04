@@ -44,6 +44,15 @@ function normalizeName(name: string): string {
   return name.toLowerCase().trim().replace(/\s+/g, " ");
 }
 
+/**
+ * Get the comparable price for a deal.
+ * Uses comparisonPrice (jämförpris per kg/l) when available for fair comparison.
+ * Falls back to discountPrice only when both deals lack comparison prices.
+ */
+function getComparablePrice(deal: Deal): number {
+  return deal.comparisonPrice ?? deal.discountPrice;
+}
+
 /** Find best-price deal IDs by comparing across stores */
 function findBestPriceIds(stores: StoreDeals[]): Set<string> {
   if (stores.length < 2) return new Set();
@@ -61,14 +70,23 @@ function findBestPriceIds(stores: StoreDeals[]): Set<string> {
     }
   }
 
-  // For products that exist at multiple stores, mark the cheapest
+  // For products at multiple stores, compare using jämförpris when available
   for (const deals of byName.values()) {
     const uniqueStores = new Set(deals.map((d) => d.storeId));
     if (uniqueStores.size < 2) continue;
 
+    // Only compare if units are compatible or both have comparisonPrice
+    const allHaveComparison = deals.every((d) => d.comparisonPrice != null);
+    const allSameUnit = new Set(deals.map((d) => d.unit)).size <= 1;
+
+    // Skip comparison if units differ and no jämförpris available
+    if (!allHaveComparison && !allSameUnit) continue;
+
     let cheapest = deals[0];
     for (const d of deals) {
-      if (d.discountPrice < cheapest.discountPrice) cheapest = d;
+      if (getComparablePrice(d) < getComparablePrice(cheapest)) {
+        cheapest = d;
+      }
     }
     bestPriceIds.add(cheapest.id);
   }

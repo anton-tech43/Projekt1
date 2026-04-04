@@ -10,6 +10,9 @@ För varje produkt, returnera ett JSON-objekt med:
 - discountPrice: number (pris i SEK, t.ex. 29.9 för 29,90 kr)
 - originalPrice: number | null (ordinarie pris om det syns, annars null)
 - unit: string | null ("kg", "st", "förp", "l", "port", eller null)
+- weight: string | null (vikt/volym om det syns, t.ex. "500g", "1kg", "750ml", "400g", eller null)
+- comparisonPrice: number | null (jämförpris per kg eller liter om det syns eller kan beräknas, annars null. T.ex. om 500g kostar 25kr -> comparisonPrice = 50)
+- comparisonUnit: string | null ("kr/kg", "kr/l", eller null)
 - description: string | null (extra info som "3 för 2", "halvpris", "veckans erbjudande", eller null)
 - category: "meat" | "fish" | "dairy" | "produce" | "bread" | "pantry" | "frozen" | "drinks" | "snacks" | "other"
 
@@ -18,6 +21,8 @@ Regler:
 - Alla priser i SEK (kronor). Skriv 29.9 inte 29:90
 - Om priset är "2 för 40kr", skriv discountPrice som 20 (enhetspris)
 - Om priset är "3 för 2" utan specifikt pris, skriv vad du kan och notera det i description
+- VIKTIGT: Försök alltid beräkna jämförpris (comparisonPrice) per kg eller liter om vikt/volym finns. Detta behövs för att jämföra priser mellan butiker rättvist.
+- Om jämförpris (jmf-pris) syns direkt i flygbladet, använd det.
 - Ignorera reklam utan tydligt pris
 - Returnera BARA en JSON-array, ingen annan text`;
 

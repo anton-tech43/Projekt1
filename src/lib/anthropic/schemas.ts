@@ -5,6 +5,9 @@ export const ExtractedDealSchema = z.object({
   discountPrice: z.number().positive(),
   originalPrice: z.number().positive().nullable().optional(),
   unit: z.string().nullable().optional(),
+  weight: z.string().nullable().optional(),
+  comparisonPrice: z.number().positive().nullable().optional(),
+  comparisonUnit: z.string().nullable().optional(),
   description: z.string().nullable().optional(),
   category: z
     .enum([

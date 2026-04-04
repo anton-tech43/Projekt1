@@ -56,7 +56,7 @@ export default function DealCard({ deal, isBestPrice }: DealCardProps) {
           )}
         </div>
       </div>
-      <div className="flex items-baseline gap-2">
+      <div className="flex items-baseline gap-2 flex-wrap">
         <span className="text-lg font-bold text-gray-900">
           {deal.discountPrice.toFixed(deal.discountPrice % 1 ? 2 : 0)} kr
         </span>
@@ -68,7 +68,15 @@ export default function DealCard({ deal, isBestPrice }: DealCardProps) {
         {deal.unit && (
           <span className="text-xs text-gray-400">/ {deal.unit}</span>
         )}
+        {deal.weight && (
+          <span className="text-xs text-gray-400">{deal.weight}</span>
+        )}
       </div>
+      {deal.comparisonPrice && deal.comparisonUnit && (
+        <p className="text-[10px] text-gray-400">
+          Jmf: {deal.comparisonPrice.toFixed(deal.comparisonPrice % 1 ? 2 : 0)} {deal.comparisonUnit}
+        </p>
+      )}
       {deal.description && (
         <p className="text-xs text-gray-500">{deal.description}</p>
       )}
