@@ -1,78 +1,77 @@
 # Matkrig
 
-Jämför veckans erbjudanden från ICA och Coop i Kärrtorp (Stockholm) och få receptförslag baserade på rabatterade varor.
+Jämför veckans erbjudanden från ICA Nära Kärrtorp och Coop Kärrtorp (Stockholm) och visa receptförslag baserade på rabatterade varor.
 
 ## Hur det fungerar
 
-1. **Ladda upp flygblad** - Ta en bild av veckans erbjudanden och ladda upp den
-2. **AI analyserar** - Claude Vision extraherar produkter och priser automatiskt
-3. **Jämför** - Se erbjudanden från båda butikerna sida vid sida
-4. **Få recept** - AI föreslår recept baserade på de rabatterade varorna
+Appen gör inga AI-anrop och behöver ingen API-nyckel. Den visar bara det som ligger i `data/uploads/`.
+
+1. **Hämta erbjudanden**: `npm run fetch` läser veckans erbjudanden direkt från butikernas sajter.
+2. **Recept**: Claude (i en Claude Code-session) skriver 3–5 recept på veckans rabatterade varor och sparar dem i `data/uploads/_recipes/{måndag}.json`.
+3. **Jämför**: `/deals` visar butikerna sida vid sida och markerar *Bästa pris* per jämförpris.
+
+Hela veckorutinen finns som projektskill i `.claude/skills/veckans-matkrig/SKILL.md`. I Claude Code räcker det att säga "kör veckans Matkrig".
 
 ## Kom igång
 
 ### Förutsättningar
 
 - Node.js 18+
-- En Anthropic API-nyckel (claude.ai)
+- Microsoft Edge (Windows) för Playwright. Annars: `npx playwright install chromium`
 
 ### Installation
 
 ```bash
 npm install
-cp .env.example .env.local
 ```
 
-Redigera `.env.local` och lägg till din API-nyckel:
-
-```
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-### Hämta erbjudanden automatiskt
+### Hämta erbjudanden
 
 ```bash
-# Installera Playwright (första gången)
-npx playwright install chromium
-
-# Hämta erbjudanden från båda butikerna
-npm run fetch
-
-# Eller en butik i taget
-npm run fetch:ica
-npm run fetch:coop
+npm run fetch          # båda butikerna
+npm run fetch:ica      # bara ICA
+npm run fetch:coop     # bara Coop
 ```
 
-Scriptet testar tre metoder i ordning:
-1. **ICA API** (kräver `ICA_USERNAME`/`ICA_PASSWORD` i `.env.local`)
-2. **Playwright scraping** (läser strukturerad data från sajten)
-3. **Claude Vision fallback** (tar screenshot och analyserar med AI)
+Flaggor (`node scripts/fetch-offers.mjs ...`):
+
+| Flagga | Vad den gör |
+| --- | --- |
+| `--method page` | Bara butikernas siddata |
+| `--method api` | Bara ICA:s handla-API (kräver `ICA_USERNAME`/`ICA_PASSWORD` i miljön, overifierat) |
+| `--method screenshot` | Bara skärmbilder, ingen parsning |
+| `--screenshots` | Spara skärmbilder även när parsningen lyckas |
+| `--headed` | Visa webbläsaren, t.ex. för att logga in |
+
+Källor:
+
+- **ICA**: sidan `ica.se/erbjudanden/ica-nara-karrtorp-1004317/` har erbjudandena i `window.__INITIAL_DATA__.offers.weeklyOffers`. Ingen inloggning behövs.
+- **Coop**: sidan `coop.se/butiker-erbjudanden/coop/coop-karrtorp/` hämtar `external.api.coop.se/dke/offers/sorting-groups/015070`. API:t kräver en nyckel som sidan själv skickar med, så svaret fångas i Edge. Coop anger inget ordinarie pris, och jämförpriset räknas ut från förpackningsstorleken.
+
+Om ingen strukturerad data hittas sparas skärmbilder (och Coops reklamblad som PDF) i `data/screenshots/{måndag}/`. Erbjudanden som inte gick att prissätta hamnar i `needs-review-{butik}.json` i samma mapp.
 
 ### Starta utvecklingsservern
 
 ```bash
-npm run dev
+npm run dev -- -p 3001
 ```
 
-Öppna [http://localhost:3000](http://localhost:3000).
+Öppna [http://localhost:3001](http://localhost:3001). Port 3000 används av Remotion på den här datorn.
 
-### Bygg för produktion
+## Data
 
-```bash
-npm run build
-npm start
-```
+`data/` är gitignorerad och stannar lokalt.
+
+- `data/uploads/index.json`: vecka → flygblads-ID:n
+- `data/uploads/{id}/flyer.json`: `WeeklyFlyer` med `Deal`-lista (se `src/lib/types.ts`)
+- `data/uploads/_recipes/{måndag}.json`: `Recipe[]`
+- `data/screenshots/{måndag}/`: skärmbilder och reklamblad
+
+`Deal.compareKey` (t.ex. `"potatis"`) används för att matcha samma sorts vara mellan butikerna. Skriptet sätter den för vanliga varor, resten kan fyllas i för hand.
 
 ## Tech stack
 
-- **Next.js 16** - React framework med App Router
-- **TypeScript** - Typsäkerhet
-- **Tailwind CSS** - Styling
-- **Claude API** - Vision för flygbladsanalys, text för receptgenerering
-- **Zod** - Validering av AI-svar
-- **sharp** - Bildbearbetning och säker omkodning
-
-## Butiker (MVP)
-
-- ICA Kärrtorp, Stockholm
-- Coop Kärrtorp, Stockholm
+- **Next.js 16** med App Router
+- **TypeScript**
+- **Tailwind CSS**
+- **Playwright** (Edge) för att läsa butikernas sidor

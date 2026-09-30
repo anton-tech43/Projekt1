@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { storage } from "@/lib/storage/json-storage";
 import { getCurrentWeekMonday } from "@/lib/week";
-import { STORES, type StoreId } from "@/lib/types";
+import { STORES } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -75,7 +75,7 @@ export default async function HomePage() {
                   erbjudanden
                 </span>
               ) : (
-                <span className="text-gray-400">Ej uppladdat</span>
+                <span className="text-gray-400">Ej hämtat</span>
               )}
             </span>
           </div>
@@ -94,7 +94,7 @@ export default async function HomePage() {
                   erbjudanden
                 </span>
               ) : (
-                <span className="text-gray-400">Ej uppladdat</span>
+                <span className="text-gray-400">Ej hämtat</span>
               )}
             </span>
           </div>
@@ -109,7 +109,7 @@ export default async function HomePage() {
               {recipes.length > 0 ? (
                 <span className="font-medium">{recipes.length} st</span>
               ) : (
-                <span className="text-gray-400">Ej genererade</span>
+                <span className="text-gray-400">Saknas</span>
               )}
             </span>
           </div>
@@ -117,19 +117,7 @@ export default async function HomePage() {
       </div>
 
       {/* Quick actions */}
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Link
-          href="/upload"
-          className="block rounded-lg border border-gray-200 bg-white p-6 hover:border-gray-300 transition-colors"
-        >
-          <h2 className="font-semibold text-gray-900">Ladda upp flygblad</h2>
-          <p className="mt-1 text-sm text-gray-500">
-            {totalDeals > 0
-              ? "Ladda upp fler flygblad eller uppdatera befintliga."
-              : "Börja med att ladda upp veckans erbjudanden."}
-          </p>
-        </Link>
-
+      <div className="grid gap-4 sm:grid-cols-2">
         <Link
           href="/deals"
           className="block rounded-lg border border-gray-200 bg-white p-6 hover:border-gray-300 transition-colors"

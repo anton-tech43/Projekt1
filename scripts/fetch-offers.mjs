@@ -1,21 +1,35 @@
 #!/usr/bin/env node
 /**
- * Matkrig CLI - Fetches weekly offers from ICA and Coop automatically.
+ * Matkrig CLI - Fetches the week's offers from ICA Nära Kärrtorp and Coop Kärrtorp.
+ * No paid APIs: structured data is read from the stores' own pages, and when that
+ * fails the script saves screenshots for Claude (in the chat session) to read.
  *
  * Usage:
- *   node scripts/fetch-offers.mjs                    # Fetch both stores
- *   node scripts/fetch-offers.mjs --store ica        # ICA only
- *   node scripts/fetch-offers.mjs --store coop       # Coop only
- *   node scripts/fetch-offers.mjs --method api       # Force API method (ICA)
- *   node scripts/fetch-offers.mjs --method scrape    # Force Playwright scrape
+ *   node scripts/fetch-offers.mjs                     # Both stores
+ *   node scripts/fetch-offers.mjs --store ica         # ICA only
+ *   node scripts/fetch-offers.mjs --store coop        # Coop only
+ *   node scripts/fetch-offers.mjs --method page       # Only the page data
+ *   node scripts/fetch-offers.mjs --method api        # Only ICA's handla API (needs ICA_USERNAME/ICA_PASSWORD)
+ *   node scripts/fetch-offers.mjs --method screenshot # Only save screenshots, no parsing
+ *   node scripts/fetch-offers.mjs --screenshots       # Also save screenshots when parsing works
+ *   node scripts/fetch-offers.mjs --headed            # Show the browser (e.g. to log in)
  *
- * Environment:
- *   ICA_USERNAME / ICA_PASSWORD  - For ICA API (optional, falls back to scraping)
+ * Sources (checked 2026-09-30, week 40):
+ *   ICA:  www.ica.se/erbjudanden/ica-nara-karrtorp-1004317/ renders the offers into
+ *         window.__INITIAL_DATA__.offers.weeklyOffers. No login needed.
+ *   Coop: www.coop.se/butiker-erbjudanden/coop/coop-karrtorp/ calls
+ *         external.api.coop.se/dke/offers/sorting-groups/015070 with a key the page
+ *         supplies (a direct request gets 401), so the response is captured in Edge.
+ *         The printed flyer is a PDF at dr.coop.se/Butik/Coop-K%C3%A4rrtorp?c=<år>-<vecka>.
  *
- * Output: Writes deals to data/uploads/{id}/flyer.json in Matkrig format.
+ * Output:
+ *   data/uploads/{id}/flyer.json + data/uploads/index.json (replaces the store's
+ *   earlier flyer for the same week).
+ *   data/screenshots/{weekOf}/  screenshots, the Coop PDF, and needs-review-{store}.json
+ *   with offers the parser could not price.
  */
 
-import { writeFile, mkdir, readFile } from "fs/promises";
+import { writeFile, mkdir, readFile, rename, rm } from "fs/promises";
 import { existsSync } from "fs";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -24,6 +38,17 @@ import { randomUUID } from "crypto";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, "..");
 const DATA_DIR = join(PROJECT_ROOT, "data", "uploads");
+const SCREENSHOT_ROOT = join(PROJECT_ROOT, "data", "screenshots");
+
+const ICA_STORE_ID = "1004317";
+const ICA_URL = "https://www.ica.se/erbjudanden/ica-nara-karrtorp-1004317/";
+const COOP_STORE_ID = "015070";
+const COOP_URL = "https://www.coop.se/butiker-erbjudanden/coop/coop-karrtorp/";
+const COOP_FLYER_URL = "https://dr.coop.se/Butik/Coop-K%C3%A4rrtorp";
+
+const CLI_ARGS = process.argv.slice(2);
+const argValue = (name, fallback) =>
+  CLI_ARGS.includes(name) ? CLI_ARGS[CLI_ARGS.indexOf(name) + 1] : fallback;
 
 // --- Utilities ---
 
@@ -33,394 +58,559 @@ function getCurrentWeekMonday() {
   const diff = day === 0 ? -6 : 1 - day;
   const monday = new Date(now);
   monday.setDate(now.getDate() + diff);
-  return monday.toISOString().split("T")[0];
+  const y = monday.getFullYear();
+  const m = String(monday.getMonth() + 1).padStart(2, "0");
+  const d = String(monday.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 
-function nanoid() {
+/** ISO week number and ISO week-year of a date */
+function isoWeek(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return { year: d.getUTCFullYear(), week: Math.ceil(((d - yearStart) / 86400000 + 1) / 7) };
+}
+
+function shortId() {
   return randomUUID().replace(/-/g, "").slice(0, 21);
 }
 
 async function atomicWrite(filePath, data) {
-  const dir = dirname(filePath);
-  await mkdir(dir, { recursive: true });
+  await mkdir(dirname(filePath), { recursive: true });
   const tmp = filePath + ".tmp";
   await writeFile(tmp, JSON.stringify(data, null, 2), "utf-8");
-  const { rename } = await import("fs/promises");
   await rename(tmp, filePath);
 }
 
-async function updateIndex(weekOf, flyerId) {
-  const indexPath = join(DATA_DIR, "index.json");
-  let index = {};
+async function readJson(filePath, fallback) {
   try {
-    index = JSON.parse(await readFile(indexPath, "utf-8"));
+    return JSON.parse(await readFile(filePath, "utf-8"));
   } catch {
-    // file doesn't exist yet
+    return fallback;
   }
-  if (!index[weekOf]) index[weekOf] = [];
-  if (!index[weekOf].includes(flyerId)) index[weekOf].push(flyerId);
-  await atomicWrite(indexPath, index);
 }
 
-const CLI_ARGS = process.argv.slice(2);
+/** "22,51" / "38,95-53,95" / "60:00" -> first number */
+function parseNumber(text) {
+  if (text == null) return undefined;
+  const m = String(text).match(/(\d+)(?:[,.:](\d+))?/);
+  if (!m) return undefined;
+  return parseFloat(m[1] + (m[2] ? "." + m[2] : ""));
+}
 
-// On Windows, use the installed Microsoft Edge so no separate browser download is needed.
-async function launchBrowser(playwright) {
-  const useEdge = CLI_ARGS.includes("--edge") || process.platform === "win32";
+function round2(n) {
+  return Math.round(n * 100) / 100;
+}
+
+/** "60:00/kg", "33:86-37:59/kg", "80:00/liter", "Jfr-pris 88,33/kg" -> { price, unit } */
+function parseComparison(text) {
+  if (!text) return {};
+  const price = parseNumber(text);
+  if (price == null) return {};
+  let unit;
+  if (/\/\s*kg/i.test(text)) unit = "kr/kg";
+  else if (/\/\s*(l|liter)\b/i.test(text)) unit = "kr/l";
+  else if (/\/\s*st/i.test(text)) unit = "kr/st";
+  return unit ? { price, unit } : {};
+}
+
+// --- Categories and cross-store matching ---
+
+const NON_FOOD = /papper|servett|ljus\b|kronljus|kattmat|hundmat|hushållsduk|rosor|ljung|blomm|tvätt|diskmedel|schampo|tandkräm/i;
+const CATEGORY_KEYWORDS = [
+  ["fish", /lax|torsk|fisk|fish|räk|sill|tonfisk|\bsej\b|kolja|makrill/i],
+  ["meat", /kyckling|fläsk|\bnöt|färs|korv|bacon|skinka|högrev|kebab|entrecote|lamm|kött|kalkon|medaljong/i],
+  ["dairy", /yoghurt|mjölk|ost\b|ost®|grädde|smör|kvarg|\bfil\b|filmjölk|frutti|crème fraiche/i],
+  ["produce", /potatis|morot|morötter|tomater i ask|plommontomat|druv|päron|plommon|satsumas|clementin|paprika|purjolök|\blök|palsternack|äpple|banan|sallad|gurka|broccoli|kål|svamp|avokado/i],
+  ["bread", /bröd|gifflar|bulle|bullar|rågbitar|chiagod|rosta|frönuftig|baguette|tortilla/i],
+  ["drinks", /^läsk|\släsk|juice|kaffe|\bte\b|vatten|dryck|saft|(^|\s)öl\b/i],
+  ["snacks", /choklad|godis|chips|proteinbar|snacks|kex|nötter|chrunchy|crunchy/i],
+  ["pantry", /mjöl|socker|müsli|krydd|tomater på burk|krossade|pasta|\bris\b|havregryn|buljong|sylt|olja/i],
+];
+const HINTS = [
+  ["frozen", /djupfryst|fryst|frys/i],
+  ["produce", /frukt|grönt/i],
+  ["bread", /bröd|bageri/i],
+  ["dairy", /mejeri|ost/i],
+  ["meat", /protein|chark|kött/i],
+  ["drinks", /dryck/i],
+  ["snacks", /konfektyr|godis/i],
+  ["pantry", /skafferi|kolonial/i],
+];
+
+function categorize(name, hint = "") {
+  if (NON_FOOD.test(name) || /\bhem/i.test(hint)) return "other";
+  if (/djupfryst|frys/i.test(hint)) return "frozen";
+  for (const [cat, re] of CATEGORY_KEYWORDS) if (re.test(name)) return cat;
+  for (const [cat, re] of HINTS) if (re.test(hint)) return cat;
+  return "other";
+}
+
+// Generic product keys so the same kind of product matches across stores
+// ("Delikatesspotatis i påse" and "Potatis i påse" -> "potatis").
+// Checked in order; the first match wins. Anything else is matched by hand.
+const COMPARE_KEYS = [
+  ["toalettpapper", /toalettpapper/i],
+  ["hushållspapper", /hushållspapper/i],
+  ["körsbärstomater", /plommontomat|körsbärstomat|babytomat/i],
+  ["krossade tomater", /tomater på burk|krossade tomater/i],
+  ["potatis", /potatis/i],
+  ["morötter", /morot|morötter/i],
+  ["plommon", /plommon/i],
+  ["päron", /päron/i],
+  ["äpplen", /äpple/i],
+  ["druvor", /druv/i],
+  ["paprika", /paprika/i],
+  ["purjolök", /purjolök/i],
+  ["palsternacka", /palsternack/i],
+  ["kycklinglårfilé", /kycklinglårfilé/i],
+  ["kycklingfilé", /kycklingfilé|kycklingbröst/i],
+  ["blandfärs", /blandfärs/i],
+  ["nötfärs", /nötfärs/i],
+  ["fläskfilé", /fläskfilé/i],
+  ["lax", /\blax/i],
+  ["läsk", /^läsk|\släsk/i],
+  ["juice", /juice/i],
+  ["bryggkaffe", /bryggkaffe/i],
+  ["fryst pizza", /pizza/i],
+  ["yoghurt", /yoghurt/i],
+  ["vetemjöl", /vetemjöl/i],
+];
+
+function compareKeyFor(name) {
+  for (const [key, re] of COMPARE_KEYS) if (re.test(name)) return key;
+  return undefined;
+}
+
+// --- Browser ---
+
+async function launchBrowser() {
+  let playwright;
+  try {
+    playwright = await import("playwright");
+  } catch {
+    throw new Error("Playwright saknas. Kör: npm install");
+  }
   const headless = !CLI_ARGS.includes("--headed");
-  if (useEdge) {
+  // On Windows, use the installed Microsoft Edge so no separate browser download is needed.
+  if (CLI_ARGS.includes("--edge") || process.platform === "win32") {
     return playwright.chromium.launch({ channel: "msedge", headless });
   }
   return playwright.chromium.launch({
-    executablePath: existsSync("/opt/pw-browsers/chromium")
-      ? "/opt/pw-browsers/chromium"
-      : undefined,
+    executablePath: existsSync("/opt/pw-browsers/chromium") ? "/opt/pw-browsers/chromium" : undefined,
     headless,
   });
 }
 
-// --- ICA API Method ---
+async function newPage(browser) {
+  const context = await browser.newContext({
+    locale: "sv-SE",
+    viewport: { width: 1280, height: 1600 },
+  });
+  return context.newPage();
+}
+
+/** Scroll to the bottom so lazy-loaded offers render */
+async function scrollThrough(page) {
+  for (let i = 0; i < 30; i++) {
+    const atBottom = await page.evaluate(() => {
+      window.scrollBy(0, window.innerHeight * 0.8);
+      return window.innerHeight + window.scrollY >= document.body.scrollHeight - 5;
+    });
+    await page.waitForTimeout(400);
+    if (atBottom) break;
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+}
+
+/**
+ * Save the page as viewport-sized screenshots (easier to read than one tall image).
+ * Returns the saved paths.
+ */
+async function screenshotChunks(page, dir, prefix, max = 20) {
+  await mkdir(dir, { recursive: true });
+  const paths = [];
+  const { height, view } = await page.evaluate(() => ({
+    height: document.body.scrollHeight,
+    view: window.innerHeight,
+  }));
+  const steps = Math.min(max, Math.ceil(height / view));
+  for (let i = 0; i < steps; i++) {
+    await page.evaluate((y) => window.scrollTo(0, y), i * view);
+    await page.waitForTimeout(500);
+    const path = join(dir, `${prefix}-${String(i + 1).padStart(2, "0")}.png`);
+    await page.screenshot({ path });
+    paths.push(path);
+  }
+  return paths;
+}
+
+/** Accept only necessary cookies if a consent banner blocks the page */
+async function dismissCookieBanner(page) {
+  const labels = [/endast nödvändiga/i, /avvisa/i, /neka/i, /reject/i];
+  for (const label of labels) {
+    const button = page.getByRole("button", { name: label }).first();
+    if (await button.isVisible().catch(() => false)) {
+      await button.click().catch(() => {});
+      await page.waitForTimeout(500);
+      return;
+    }
+  }
+}
+
+// --- ICA: page data ---
+
+async function fetchIcaPage(browser, shotDir) {
+  console.log("  ICA sida: Läser window.__INITIAL_DATA__...");
+  const page = await newPage(browser);
+  await page.goto(ICA_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForTimeout(3000);
+
+  const offers = await page.evaluate(() => {
+    const data = window.__INITIAL_DATA__;
+    const list = data?.offers?.weeklyOffers;
+    return Array.isArray(list) ? JSON.parse(JSON.stringify(list)) : null;
+  });
+
+  if (CLI_ARGS.includes("--screenshots")) {
+    await dismissCookieBanner(page);
+    await scrollThrough(page);
+    const paths = await screenshotChunks(page, shotDir, "ica");
+    console.log(`  ICA sida: ${paths.length} skärmbilder sparade`);
+  }
+  await page.close();
+
+  if (!offers) {
+    console.log("  ICA sida: Hittade inga weeklyOffers i sidans data");
+    return null;
+  }
+  console.log(`  ICA sida: ${offers.length} erbjudanden`);
+  return normalizeIcaOffers(offers);
+}
+
+function normalizeIcaOffers(offers) {
+  const deals = [];
+  const review = [];
+
+  for (const o of offers) {
+    const d = o.details ?? {};
+    const m = o.parsedMechanics ?? {};
+    const name = d.name?.trim();
+    if (!name) continue;
+
+    const total = parseNumber(m.value2);
+    const qty = m.quantity ?? 0;
+    const perKg = /\/kg/i.test(m.value4 ?? "") || /kr\/kg/i.test(d.mechanicInfo ?? "");
+
+    if (m.benefitType !== "FIXED" || total == null) {
+      review.push({ reason: `mekanik ${m.type}/${m.benefitType}`, name, mechanicInfo: d.mechanicInfo, raw: o });
+      continue;
+    }
+
+    let discountPrice = total;
+    let unit = perKg ? "kg" : "st";
+    if (!perKg && qty > 1) discountPrice = round2(total / qty);
+
+    let { price: comparisonPrice, unit: comparisonUnit } = parseComparison(o.comparisonPrice);
+    if (comparisonPrice == null && perKg) {
+      comparisonPrice = discountPrice;
+      comparisonUnit = "kr/kg";
+    }
+
+    const extras = [
+      d.mechanicInfo,
+      o.traits?.includes("Stammis") ? "Stammispris" : null,
+      d.brand,
+      o.restriction,
+      o.condition,
+    ].filter(Boolean);
+
+    deals.push({
+      productName: name,
+      discountPrice,
+      originalPrice: parseNumber(o.stores?.[0]?.regularPrice),
+      unit,
+      weight: d.packageInformation || undefined,
+      comparisonPrice,
+      comparisonUnit,
+      description: extras.join(" · "),
+      category: categorize(name, o.category?.articleGroupName),
+      compareKey: compareKeyFor(name),
+    });
+  }
+
+  return { deals, review };
+}
+
+// --- ICA: handla API (optional, unverified) ---
 
 async function fetchIcaApi() {
   const username = process.env.ICA_USERNAME;
   const password = process.env.ICA_PASSWORD;
-
   if (!username || !password) {
-    console.log("  ICA API: Inga ICA-uppgifter (ICA_USERNAME/ICA_PASSWORD). Hoppar över API-metod.");
+    console.log("  ICA API: Inga ICA_USERNAME/ICA_PASSWORD. Hoppar över.");
     return null;
   }
 
+  // Based on github.com/svendahlstrand/ica-api. Not verified against the live API.
   console.log("  ICA API: Loggar in...");
-
-  // Step 1: Login
-  const authHeader = "Basic " + Buffer.from(`${username}:${password}`).toString("base64");
   const loginRes = await fetch("https://handla.api.ica.se/api/login", {
-    headers: { Authorization: authHeader },
+    headers: { Authorization: "Basic " + Buffer.from(`${username}:${password}`).toString("base64") },
   });
-
   if (!loginRes.ok) {
     console.log(`  ICA API: Inloggning misslyckades (${loginRes.status})`);
     return null;
   }
-
   const ticket = loginRes.headers.get("authenticationticket");
   if (!ticket) {
     console.log("  ICA API: Ingen AuthenticationTicket i svaret");
     return null;
   }
 
-  // Step 2: Fetch offers
-  console.log("  ICA API: Hämtar erbjudanden för butik 1004317...");
-  const offersRes = await fetch("https://handla.api.ica.se/api/offers?Stores=1004317", {
+  const offersRes = await fetch(`https://handla.api.ica.se/api/offers?Stores=${ICA_STORE_ID}`, {
     headers: { AuthenticationTicket: ticket },
   });
-
   if (!offersRes.ok) {
     console.log(`  ICA API: Kunde inte hämta erbjudanden (${offersRes.status})`);
     return null;
   }
+  const offers = (await offersRes.json()).Offers ?? [];
+  console.log(`  ICA API: ${offers.length} erbjudanden`);
 
-  const data = await offersRes.json();
-  const offers = data.Offers || [];
-
-  console.log(`  ICA API: ${offers.length} erbjudanden hittade`);
-
-  return offers.map((o) => ({
-    productName: o.ProductName || "Okänd produkt",
-    discountPrice: parsePrice(o.OfferCondition) || 0,
-    originalPrice: undefined,
-    unit: extractUnit(o.SizeOrQuantity),
-    weight: o.SizeOrQuantity || undefined,
-    description: o.OfferCondition || undefined,
-    category: mapIcaCategory(o.ArticleGroupId),
-  }));
-}
-
-// --- ICA Scrape Method (Playwright) ---
-
-async function fetchIcaScrape() {
-  console.log("  ICA Scrape: Startar Playwright...");
-
-  let playwright;
-  try {
-    playwright = await import("playwright");
-  } catch {
-    console.log("  ICA Scrape: Playwright inte installerat. Kör: npm install playwright");
-    return null;
-  }
-
-  const browser = await launchBrowser(playwright);
-
-  try {
-    const page = await browser.newPage();
-    await page.goto("https://www.ica.se/erbjudanden/ica-nara-karrtorp-1004317/", {
-      waitUntil: "networkidle",
-      timeout: 30000,
-    });
-
-    // Wait for offers to load
-    await page.waitForTimeout(3000);
-
-    // Extract offers from the page
-    const offers = await page.evaluate(() => {
-      const cards = document.querySelectorAll('[data-testid="offer-card"], .offer-card, [class*="offer"], [class*="product-card"]');
-      const results = [];
-
-      cards.forEach((card) => {
-        const name =
-          card.querySelector('[class*="name"], [class*="title"], h3, h4')?.textContent?.trim() ||
-          card.querySelector("p")?.textContent?.trim();
-        const price = card.querySelector('[class*="price"]')?.textContent?.trim();
-
-        if (name && price) {
-          results.push({ name, price, fullText: card.textContent?.trim() });
-        }
-      });
-
-      // Fallback: try to find any structured offer data in the page
-      if (results.length === 0) {
-        // Check for JSON-LD
-        const scripts = document.querySelectorAll('script[type="application/ld+json"]');
-        scripts.forEach((s) => {
-          try {
-            const data = JSON.parse(s.textContent);
-            if (data.offers || data["@type"] === "Offer") {
-              results.push({ jsonLd: data });
-            }
-          } catch {}
-        });
-      }
-
-      return results;
-    });
-
-    console.log(`  ICA Scrape: ${offers.length} erbjudanden hittade`);
-
-    // Also try capturing network requests that contain offer data
-    const networkOffers = [];
-    page.on("response", async (response) => {
-      const url = response.url();
-      if (url.includes("offer") || url.includes("campaign") || url.includes("erbjud")) {
-        try {
-          const json = await response.json();
-          networkOffers.push({ url, data: json });
-        } catch {}
-      }
-    });
-
-    // Reload to capture API calls
-    await page.reload({ waitUntil: "networkidle", timeout: 30000 });
-    await page.waitForTimeout(2000);
-
-    if (networkOffers.length > 0) {
-      console.log(`  ICA Scrape: ${networkOffers.length} API-anrop upptäckta med erbjudandedata`);
-    }
-
-    return parseScrapedOffers(offers, networkOffers, "ica");
-  } finally {
-    await browser.close();
-  }
-}
-
-// --- Coop Scrape Method ---
-
-async function fetchCoopScrape() {
-  console.log("  Coop Scrape: Startar Playwright...");
-
-  let playwright;
-  try {
-    playwright = await import("playwright");
-  } catch {
-    console.log("  Coop Scrape: Playwright inte installerat. Kör: npm install playwright");
-    return null;
-  }
-
-  const browser = await launchBrowser(playwright);
-
-  try {
-    const page = await browser.newPage();
-
-    // Capture API responses
-    const apiResponses = [];
-    page.on("response", async (response) => {
-      const url = response.url();
-      if (
-        url.includes("offer") ||
-        url.includes("campaign") ||
-        url.includes("product") ||
-        url.includes("erbjud") ||
-        url.includes("reklamblad")
-      ) {
-        try {
-          const contentType = response.headers()["content-type"] || "";
-          if (contentType.includes("json")) {
-            const json = await response.json();
-            apiResponses.push({ url, data: json });
-          }
-        } catch {}
-      }
-    });
-
-    // Try the digital flyer page
-    await page.goto("https://www.coop.se/butiker-erbjudanden/coop/coop-karrtorp/", {
-      waitUntil: "networkidle",
-      timeout: 30000,
-    });
-    await page.waitForTimeout(3000);
-
-    // Extract offers from the page
-    const offers = await page.evaluate(() => {
-      const cards = document.querySelectorAll('[class*="offer"], [class*="product"], [class*="deal"], [class*="campaign"]');
-      const results = [];
-
-      cards.forEach((card) => {
-        const name =
-          card.querySelector('[class*="name"], [class*="title"], h3, h4, h2')?.textContent?.trim();
-        const price = card.querySelector('[class*="price"]')?.textContent?.trim();
-
-        if (name && name.length > 2) {
-          results.push({
-            name,
-            price: price || "",
-            fullText: card.textContent?.trim().slice(0, 200),
-          });
-        }
-      });
-
-      return results;
-    });
-
-    console.log(`  Coop Scrape: ${offers.length} erbjudanden från HTML`);
-    console.log(`  Coop Scrape: ${apiResponses.length} API-svar fångade`);
-
-    return parseScrapedOffers(offers, apiResponses, "coop");
-  } finally {
-    await browser.close();
-  }
-}
-
-// --- Parse helpers ---
-
-function parsePrice(text) {
-  if (!text) return 0;
-  const match = text.match(/(\d+)[,.]?(\d*)\s*(?:kr|:-)/i);
-  if (match) {
-    return parseFloat(match[1] + (match[2] ? "." + match[2] : ""));
-  }
-  const numMatch = text.match(/(\d+)[,.]?(\d*)/);
-  if (numMatch) {
-    return parseFloat(numMatch[1] + (numMatch[2] ? "." + numMatch[2] : ""));
-  }
-  return 0;
-}
-
-function extractUnit(text) {
-  if (!text) return undefined;
-  if (/\/kg/i.test(text)) return "kg";
-  if (/\/st/i.test(text)) return "st";
-  if (/\/l/i.test(text)) return "l";
-  if (/\/förp/i.test(text)) return "förp";
-  if (/\bkg\b/i.test(text)) return "kg";
-  if (/\bst\b/i.test(text)) return "st";
-  if (/\bl\b/i.test(text)) return "l";
-  return undefined;
-}
-
-function mapIcaCategory(groupId) {
-  // ICA article group IDs - rough mapping
-  const map = {
-    1: "meat", 2: "meat", 3: "fish", 4: "dairy", 5: "dairy",
-    6: "produce", 7: "produce", 8: "bread", 9: "pantry", 10: "frozen",
-    11: "drinks", 12: "drinks", 13: "snacks",
-  };
-  return map[groupId] || "other";
-}
-
-function parseScrapedOffers(htmlOffers, apiResponses, store) {
   const deals = [];
-
-  // Parse HTML offers
-  for (const offer of htmlOffers) {
-    if (offer.jsonLd) continue; // Skip JSON-LD for now
-    const name = offer.name;
-    const price = parsePrice(offer.price || offer.fullText);
-    if (name && price > 0) {
-      deals.push({
-        productName: name,
-        discountPrice: price,
-        unit: extractUnit(offer.fullText),
-        weight: undefined,
-        description: undefined,
-        category: "other",
-      });
+  const review = [];
+  for (const o of offers) {
+    const name = o.ProductName?.trim();
+    const price = parseNumber(o.OfferCondition);
+    if (!name) continue;
+    if (price == null) {
+      review.push({ reason: "okänt pris", name, raw: o });
+      continue;
     }
+    deals.push({
+      productName: name,
+      discountPrice: price,
+      unit: /kg/i.test(o.OfferCondition ?? "") ? "kg" : "st",
+      weight: o.SizeOrQuantity || undefined,
+      description: o.OfferCondition || undefined,
+      category: categorize(name),
+      compareKey: compareKeyFor(name),
+    });
   }
-
-  // Parse API responses - look for array of product/offer objects
-  for (const resp of apiResponses) {
-    const items = findOfferArrays(resp.data);
-    for (const item of items) {
-      const name = item.productName || item.name || item.title || item.ProductName;
-      const price =
-        item.price || item.discountPrice || item.currentPrice || item.Price ||
-        parsePrice(item.priceText || item.PriceText || "");
-
-      if (name && price > 0 && !deals.some((d) => d.productName === name)) {
-        deals.push({
-          productName: name,
-          discountPrice: typeof price === "number" ? price : parsePrice(String(price)),
-          originalPrice: item.originalPrice || item.wasPrice || item.OriginalPrice || undefined,
-          unit: extractUnit(item.unit || item.sizeOrQuantity || item.SizeOrQuantity || ""),
-          weight: item.weight || item.sizeOrQuantity || item.SizeOrQuantity || undefined,
-          comparisonPrice: item.comparisonPrice || item.unitPrice || undefined,
-          comparisonUnit: item.comparisonUnit || item.unitPriceText || undefined,
-          description: item.description || item.offerCondition || item.OfferCondition || undefined,
-          category: "other",
-        });
-      }
-    }
-  }
-
-  return deals;
+  return { deals, review };
 }
 
-function findOfferArrays(obj) {
-  if (!obj || typeof obj !== "object") return [];
-  if (Array.isArray(obj)) {
-    // Check if this looks like an array of offers
-    if (obj.length > 0 && obj[0] && (obj[0].productName || obj[0].name || obj[0].ProductName || obj[0].title)) {
-      return obj;
-    }
-    return obj.flatMap(findOfferArrays);
+// --- Coop: API response captured in the browser ---
+
+async function fetchCoopPage(browser, shotDir) {
+  console.log("  Coop sida: Fångar svaret från dke/offers...");
+  const page = await newPage(browser);
+  const offersResponse = page
+    .waitForResponse((r) => r.url().includes(`/dke/offers/sorting-groups/${COOP_STORE_ID}`) && r.ok(), {
+      timeout: 45000,
+    })
+    .catch(() => null);
+
+  await page.goto(COOP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await dismissCookieBanner(page);
+  await scrollThrough(page);
+
+  const response = await offersResponse;
+  const data = response ? await response.json().catch(() => null) : null;
+
+  if (CLI_ARGS.includes("--screenshots")) {
+    const paths = await screenshotChunks(page, shotDir, "coop");
+    console.log(`  Coop sida: ${paths.length} skärmbilder sparade`);
   }
-  return Object.values(obj).flatMap(findOfferArrays);
+  await page.close();
+
+  const group = data?.sortingGroups?.find((g) => g.id === "alla") ?? data?.sortingGroups?.[0];
+  if (!group?.offers) {
+    console.log("  Coop sida: Inget offers-svar fångades");
+    return null;
+  }
+  console.log(`  Coop sida: ${group.offers.length} erbjudanden`);
+  return normalizeCoopOffers(group.offers);
+}
+
+/**
+ * Package size in kg or l. Reads amountInformation ("310-350 g.", "33 cl.") and
+ * uses the upper bound of a range, which gives the lowest jämförpris like ICA's
+ * "83:33-138:89/kg" does. Falls back to weightVolume + netContentUnit.
+ */
+function coopPackageSize(content) {
+  const m = (content.amountInformation ?? "").match(
+    /(\d+(?:,\d+)?)(?:\s*-\s*(\d+(?:,\d+)?))?\s*(kg|g|ml|cl|l)\b/i
+  );
+  if (m) {
+    const factors = { kg: [1, "kr/kg"], g: [0.001, "kr/kg"], l: [1, "kr/l"], cl: [0.01, "kr/l"], ml: [0.001, "kr/l"] };
+    const [factor, unit] = factors[m[3].toLowerCase()];
+    return { size: parseFloat((m[2] ?? m[1]).replace(",", ".")) * factor, unit };
+  }
+
+  const amount = parseNumber(content.weightVolume);
+  if (!amount) return {};
+  switch (content.netContentUnit) {
+    case "Gram":
+      return { size: amount / 1000, unit: "kr/kg" };
+    case "Kilogram":
+      return { size: amount, unit: "kr/kg" };
+    case "Milliliter":
+      return { size: amount / 1000, unit: "kr/l" };
+    case "Centiliter":
+      return { size: amount / 100, unit: "kr/l" };
+    case "Liter":
+      return { size: amount, unit: "kr/l" };
+    default:
+      return {};
+  }
+}
+
+function normalizeCoopOffers(offers) {
+  const deals = [];
+  const review = [];
+
+  for (const o of offers) {
+    const p = o.priceInformation ?? {};
+    const c = o.content ?? {};
+    const name = c.title?.trim();
+    if (!name) continue;
+
+    let discountPrice;
+    let unit = p.unit === "kg" ? "kg" : "st";
+    let mechanic;
+    let comparisonPrice;
+    let comparisonUnit;
+
+    if (p.dealType === "styckpris" && p.discountValue != null) {
+      discountPrice = p.discountValue;
+    } else if (p.dealType === "pris" && p.discountValue != null) {
+      const qty = p.quantity ?? 1;
+      discountPrice = qty > 1 ? round2(p.discountValue / qty) : p.discountValue;
+      unit = "st";
+      if (qty > 1) mechanic = `${qty} för ${p.discountValue} kr`;
+    } else if (p.dealType === "Ladder Deal" && p.steps?.length) {
+      // "3 för 25, 5 för 35, 10 för 50": price by the smallest step
+      const first = p.steps[0];
+      discountPrice = round2(first.discountValue / first.quantity);
+      unit = "st";
+      mechanic = p.steps.map((s) => `${s.quantity} för ${s.discountValue} kr`).join(", ");
+      ({ price: comparisonPrice, unit: comparisonUnit } = parseComparison(first.comparisonPrice));
+    } else {
+      review.push({ reason: `dealType ${p.dealType}`, name, raw: o });
+      continue;
+    }
+
+    if (comparisonPrice == null) {
+      if (unit === "kg") {
+        comparisonPrice = discountPrice;
+        comparisonUnit = "kr/kg";
+      } else {
+        const { size, unit: cu } = coopPackageSize(c);
+        if (size) {
+          comparisonPrice = round2(discountPrice / size);
+          comparisonUnit = cu;
+        }
+      }
+    }
+
+    const extras = [
+      mechanic,
+      p.isMemberPrice ? "Medlemspris" : null,
+      c.brand,
+      c.dealOfferLimitText,
+    ].filter(Boolean);
+
+    deals.push({
+      productName: name,
+      discountPrice,
+      unit,
+      weight: c.amountInformation?.replace(/\.\s*$/, "") || undefined,
+      comparisonPrice,
+      comparisonUnit,
+      description: extras.join(" · "),
+      category: categorize(name, `${o.categoryTeam?.name ?? ""} ${o.categoryGroup ?? ""}`),
+      compareKey: compareKeyFor(name),
+    });
+  }
+
+  return { deals, review };
+}
+
+// --- Screenshot fallback ---
+
+async function screenshotIca(browser, shotDir) {
+  const page = await newPage(browser);
+  await page.goto(ICA_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await page.waitForTimeout(3000);
+  await dismissCookieBanner(page);
+  await scrollThrough(page);
+  const paths = await screenshotChunks(page, shotDir, "ica");
+  await page.close();
+  console.log(`  ICA: ${paths.length} skärmbilder i ${shotDir}`);
+}
+
+/** Download the Coop flyer PDF and screenshot it page by page in Edge's PDF viewer */
+async function screenshotCoopFlyer(browser, shotDir, weekOf) {
+  const { year, week } = isoWeek(new Date(weekOf + "T12:00:00"));
+  const url = `${COOP_FLYER_URL}?c=${year}-${week}`;
+  await mkdir(shotDir, { recursive: true });
+
+  const res = await fetch(url);
+  if (res.ok && (res.headers.get("content-type") ?? "").includes("pdf")) {
+    const pdfPath = join(shotDir, `coop-reklamblad-v${week}.pdf`);
+    await writeFile(pdfPath, Buffer.from(await res.arrayBuffer()));
+    console.log(`  Coop: Reklambladet sparat (${pdfPath})`);
+  } else {
+    console.log(`  Coop: Inget reklamblad på ${url} (${res.status})`);
+    return;
+  }
+
+  const page = await browser.newPage({ viewport: { width: 1400, height: 1900 } });
+  await page.goto(url, { waitUntil: "load", timeout: 60000 });
+  await page.waitForTimeout(4000);
+  await page.mouse.click(700, 900);
+  for (let n = 1; n <= 12; n++) {
+    await page.screenshot({ path: join(shotDir, `coop-reklamblad-${String(n).padStart(2, "0")}.png`) });
+    for (let i = 0; i < 12; i++) {
+      await page.mouse.wheel(0, 150);
+      await page.waitForTimeout(60);
+    }
+    await page.waitForTimeout(1200);
+  }
+  await page.close();
+  console.log(`  Coop: 12 skärmbilder av reklambladet i ${shotDir}`);
+}
+
+async function screenshotCoopPage(browser, shotDir) {
+  const page = await newPage(browser);
+  await page.goto(COOP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
+  await dismissCookieBanner(page);
+  await scrollThrough(page);
+  const paths = await screenshotChunks(page, shotDir, "coop");
+  await page.close();
+  console.log(`  Coop: ${paths.length} skärmbilder av erbjudandesidan i ${shotDir}`);
 }
 
 // --- Save to Matkrig format ---
 
-async function saveDeals(storeId, rawDeals, method) {
-  if (!rawDeals || rawDeals.length === 0) {
-    console.log(`  Inga erbjudanden att spara för ${storeId}`);
-    return;
+async function saveDeals(storeId, result, method, weekOf, shotDir) {
+  if (result?.review?.length) {
+    const reviewPath = join(shotDir, `needs-review-${storeId}.json`);
+    await atomicWrite(reviewPath, result.review);
+    console.log(`  ! ${result.review.length} erbjudanden kunde inte prissättas, se ${reviewPath}`);
   }
 
-  const weekOf = getCurrentWeekMonday();
-  const flyerId = nanoid();
+  const rawDeals = result?.deals ?? [];
+  if (rawDeals.length === 0) {
+    console.log(`  Inga erbjudanden sparade för ${storeId}`);
+    return false;
+  }
 
-  const deals = rawDeals.map((d) => ({
-    id: nanoid(),
-    storeId,
-    productName: d.productName,
-    discountPrice: d.discountPrice,
-    originalPrice: d.originalPrice || undefined,
-    unit: d.unit || undefined,
-    weight: d.weight || undefined,
-    comparisonPrice: d.comparisonPrice || undefined,
-    comparisonUnit: d.comparisonUnit || undefined,
-    description: d.description || undefined,
-    category: d.category || "other",
-    weekOf,
-  }));
+  const flyerId = shortId();
+  const deals = rawDeals.map((d) => ({ id: shortId(), storeId, ...d, weekOf }));
 
   const flyer = {
     id: flyerId,
@@ -431,192 +621,109 @@ async function saveDeals(storeId, rawDeals, method) {
     status: "extracted",
     deals,
   };
+  await atomicWrite(join(DATA_DIR, flyerId, "flyer.json"), flyer);
 
-  const flyerPath = join(DATA_DIR, flyerId, "flyer.json");
-  await atomicWrite(flyerPath, flyer);
-  await updateIndex(weekOf, flyerId);
-
-  console.log(`  ✓ Sparade ${deals.length} erbjudanden från ${storeId} (flygblads-ID: ${flyerId})`);
-}
-
-// --- Vision fallback: use Claude to analyze screenshot ---
-
-async function fetchWithVision(storeId, url) {
-  console.log(`  Vision fallback: Tar screenshot av ${url}...`);
-
-  let playwright;
-  try {
-    playwright = await import("playwright");
-  } catch {
-    console.log("  Vision: Playwright inte installerat.");
-    return null;
+  // Replace this store's earlier flyer for the same week
+  const indexPath = join(DATA_DIR, "index.json");
+  const index = await readJson(indexPath, {});
+  const kept = [];
+  for (const id of index[weekOf] ?? []) {
+    const old = await readJson(join(DATA_DIR, id, "flyer.json"), null);
+    if (old?.storeId === storeId) {
+      await rm(join(DATA_DIR, id), { recursive: true, force: true });
+    } else {
+      kept.push(id);
+    }
   }
+  index[weekOf] = [...kept, flyerId];
+  await atomicWrite(indexPath, index);
 
-  const browser = await launchBrowser(playwright);
-
-  try {
-    const page = await browser.newPage({ viewport: { width: 1280, height: 4000 } });
-    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
-    await page.waitForTimeout(3000);
-
-    // Scroll down to load all offers
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-    await page.waitForTimeout(2000);
-
-    const screenshot = await page.screenshot({ fullPage: true, type: "jpeg", quality: 85 });
-    const base64 = screenshot.toString("base64");
-
-    console.log(`  Vision: Screenshot tagen (${Math.round(base64.length / 1024)}KB). Skickar till Claude...`);
-
-    // Load API key
-    const envPath = join(PROJECT_ROOT, ".env.local");
-    let apiKey = process.env.ANTHROPIC_API_KEY;
-    if (!apiKey && existsSync(envPath)) {
-      const envContent = await readFile(envPath, "utf-8");
-      const match = envContent.match(/ANTHROPIC_API_KEY=(.+)/);
-      if (match) apiKey = match[1].trim();
-    }
-
-    if (!apiKey) {
-      console.log("  Vision: Ingen ANTHROPIC_API_KEY hittad. Kan inte analysera screenshot.");
-      return null;
-    }
-
-    // Call Claude Vision API
-    const { default: Anthropic } = await import("@anthropic-ai/sdk");
-    const client = new Anthropic({ apiKey });
-
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
-      temperature: 0,
-      system: `Du är en expert på att läsa svenska matvarubutikens erbjudandesidor.
-Extrahera alla rabatterade produkter som syns i bilden.
-
-Returnera BARA en JSON-array med objekt:
-{
-  "productName": "produktnamn",
-  "discountPrice": number i SEK,
-  "originalPrice": number | null,
-  "unit": "kg" | "st" | "förp" | "l" | null,
-  "weight": "500g" | "1kg" | null,
-  "comparisonPrice": number (jämförpris per kg/l) | null,
-  "comparisonUnit": "kr/kg" | "kr/l" | null,
-  "description": "extra info" | null,
-  "category": "meat" | "fish" | "dairy" | "produce" | "bread" | "pantry" | "frozen" | "drinks" | "snacks" | "other"
-}`,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "image",
-              source: { type: "base64", media_type: "image/jpeg", data: base64 },
-            },
-            {
-              type: "text",
-              text: "Extrahera alla rabatterade produkter från denna erbjudandesida.",
-            },
-          ],
-        },
-      ],
-    });
-
-    const textBlock = response.content.find((b) => b.type === "text");
-    if (!textBlock) return null;
-
-    const raw = textBlock.text.trim();
-    const jsonStr = raw.startsWith("[") ? raw : (raw.match(/```(?:json)?\s*([\s\S]*?)```/)?.[1]?.trim() || raw);
-
-    try {
-      const parsed = JSON.parse(jsonStr);
-      console.log(`  Vision: ${parsed.length} produkter extraherade av Claude`);
-      return parsed;
-    } catch {
-      console.log("  Vision: Kunde inte parsa Claudes svar som JSON");
-      return null;
-    }
-  } finally {
-    await browser.close();
-  }
+  console.log(`  ✓ Sparade ${deals.length} erbjudanden för ${storeId} (flygblads-ID: ${flyerId})`);
+  return true;
 }
 
 // --- Main ---
 
 async function main() {
-  const args = process.argv.slice(2);
-  const storeFilter = args.includes("--store") ? args[args.indexOf("--store") + 1] : "both";
-  const methodFilter = args.includes("--method") ? args[args.indexOf("--method") + 1] : "auto";
+  const storeFilter = argValue("--store", "both");
+  const method = argValue("--method", "auto");
+  const weekOf = getCurrentWeekMonday();
+  const shotDir = join(SCREENSHOT_ROOT, weekOf);
 
   console.log("🛒 Matkrig - Hämtar veckans erbjudanden");
-  console.log(`   Vecka som börjar: ${getCurrentWeekMonday()}`);
-  console.log(`   Butiker: ${storeFilter}, Metod: ${methodFilter}\n`);
+  console.log(`   Vecka som börjar: ${weekOf}`);
+  console.log(`   Butiker: ${storeFilter}, Metod: ${method}\n`);
 
-  // --- ICA ---
-  if (storeFilter === "both" || storeFilter === "ica") {
-    console.log("📍 ICA Nära Kärrtorp");
+  const browser = await launchBrowser();
+  const missing = [];
 
-    let icaDeals = null;
+  try {
+    if (storeFilter === "both" || storeFilter === "ica") {
+      console.log("📍 ICA Nära Kärrtorp");
+      let result = null;
+      let used = "none";
 
-    // Method 1: ICA API (needs credentials)
-    if (methodFilter === "auto" || methodFilter === "api") {
-      icaDeals = await fetchIcaApi().catch((e) => {
-        console.log(`  ICA API fel: ${e.message}`);
-        return null;
-      });
+      if (method === "auto" || method === "page") {
+        result = await fetchIcaPage(browser, shotDir).catch((e) => {
+          console.log(`  ICA sida fel: ${e.message}`);
+          return null;
+        });
+        if (result?.deals.length) used = "page";
+      }
+      if (!result?.deals.length && (method === "auto" || method === "api")) {
+        result = await fetchIcaApi().catch((e) => {
+          console.log(`  ICA API fel: ${e.message}`);
+          return null;
+        });
+        if (result?.deals.length) used = "api";
+      }
+
+      const saved =
+        method !== "screenshot" && (await saveDeals("ica-karrtorp", result, used, weekOf, shotDir));
+      if (!saved) {
+        await screenshotIca(browser, shotDir).catch((e) =>
+          console.log(`  ICA skärmbilder fel: ${e.message}`)
+        );
+        missing.push("ica-karrtorp");
+      }
     }
 
-    // Method 2: Playwright scrape
-    if (!icaDeals && (methodFilter === "auto" || methodFilter === "scrape")) {
-      icaDeals = await fetchIcaScrape().catch((e) => {
-        console.log(`  ICA Scrape fel: ${e.message}`);
-        return null;
-      });
-    }
+    if (storeFilter === "both" || storeFilter === "coop") {
+      console.log("\n📍 Coop Kärrtorp");
+      let result = null;
 
-    // Method 3: Vision fallback (screenshot + Claude)
-    if (!icaDeals || icaDeals.length === 0) {
-      icaDeals = await fetchWithVision(
-        "ica-karrtorp",
-        "https://www.ica.se/erbjudanden/ica-nara-karrtorp-1004317/"
-      ).catch((e) => {
-        console.log(`  ICA Vision fel: ${e.message}`);
-        return null;
-      });
-    }
+      if (method === "auto" || method === "page") {
+        result = await fetchCoopPage(browser, shotDir).catch((e) => {
+          console.log(`  Coop sida fel: ${e.message}`);
+          return null;
+        });
+      }
 
-    await saveDeals("ica-karrtorp", icaDeals, icaDeals ? "auto" : "none");
+      const saved =
+        method !== "screenshot" && (await saveDeals("coop-karrtorp", result, "page", weekOf, shotDir));
+      if (!saved) {
+        await screenshotCoopFlyer(browser, shotDir, weekOf).catch((e) =>
+          console.log(`  Coop reklamblad fel: ${e.message}`)
+        );
+        await screenshotCoopPage(browser, shotDir).catch((e) =>
+          console.log(`  Coop skärmbilder fel: ${e.message}`)
+        );
+        missing.push("coop-karrtorp");
+      } else if (CLI_ARGS.includes("--screenshots")) {
+        await screenshotCoopFlyer(browser, shotDir, weekOf).catch((e) =>
+          console.log(`  Coop reklamblad fel: ${e.message}`)
+        );
+      }
+    }
+  } finally {
+    await browser.close();
   }
 
-  // --- Coop ---
-  if (storeFilter === "both" || storeFilter === "coop") {
-    console.log("\n📍 Coop Kärrtorp");
-
-    let coopDeals = null;
-
-    // Method 1: Playwright scrape
-    if (methodFilter === "auto" || methodFilter === "scrape") {
-      coopDeals = await fetchCoopScrape().catch((e) => {
-        console.log(`  Coop Scrape fel: ${e.message}`);
-        return null;
-      });
-    }
-
-    // Method 2: Vision fallback
-    if (!coopDeals || coopDeals.length === 0) {
-      coopDeals = await fetchWithVision(
-        "coop-karrtorp",
-        "https://www.coop.se/butiker-erbjudanden/coop/coop-karrtorp/"
-      ).catch((e) => {
-        console.log(`  Coop Vision fel: ${e.message}`);
-        return null;
-      });
-    }
-
-    await saveDeals("coop-karrtorp", coopDeals, coopDeals ? "auto" : "none");
+  if (missing.length) {
+    console.log(`\n⚠ Ingen strukturerad data för: ${missing.join(", ")}.`);
+    console.log(`  Läs skärmbilderna i ${shotDir} och skriv flyer.json för hand.`);
   }
-
-  console.log("\n✅ Klar! Starta appen med: npm run dev");
+  console.log("\n✅ Klar!");
 }
 
 main().catch((e) => {

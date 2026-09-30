@@ -36,6 +36,7 @@ yarn-error.log*
 
 # runtime data storage
 /data/uploads/
+/data/screenshots/
 
 # vercel
 .vercel

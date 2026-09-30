@@ -39,56 +39,57 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: "Övrigt",
 };
 
-/** Normalize product name for comparison */
-function normalizeName(name: string): string {
-  return name.toLowerCase().trim().replace(/\s+/g, " ");
+/** Key used to match the same kind of product across stores */
+function matchKey(deal: Deal): string {
+  return (deal.compareKey ?? deal.productName)
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, " ");
 }
 
 /**
- * Get the comparable price for a deal.
- * Uses comparisonPrice (jämförpris per kg/l) when available for fair comparison.
- * Falls back to discountPrice only when both deals lack comparison prices.
+ * Find best-price deal IDs by comparing across stores.
+ * Deals match on compareKey (falls back to product name). Prices are compared
+ * on jämförpris when every deal in the group has one in the same unit
+ * (kr/kg vs kr/kg), otherwise on the item price when the units agree.
  */
-function getComparablePrice(deal: Deal): number {
-  return deal.comparisonPrice ?? deal.discountPrice;
-}
-
-/** Find best-price deal IDs by comparing across stores */
 function findBestPriceIds(stores: StoreDeals[]): Set<string> {
   if (stores.length < 2) return new Set();
 
   const bestPriceIds = new Set<string>();
 
-  // Build lookup: normalized name -> deals from different stores
-  const byName = new Map<string, Deal[]>();
+  const byKey = new Map<string, Deal[]>();
   for (const store of stores) {
     for (const deal of store.deals) {
-      const key = normalizeName(deal.productName);
-      const list = byName.get(key) ?? [];
+      const key = matchKey(deal);
+      const list = byKey.get(key) ?? [];
       list.push(deal);
-      byName.set(key, list);
+      byKey.set(key, list);
     }
   }
 
-  // For products at multiple stores, compare using jämförpris when available
-  for (const deals of byName.values()) {
+  for (const deals of byKey.values()) {
     const uniqueStores = new Set(deals.map((d) => d.storeId));
     if (uniqueStores.size < 2) continue;
 
-    // Only compare if units are compatible or both have comparisonPrice
-    const allHaveComparison = deals.every((d) => d.comparisonPrice != null);
-    const allSameUnit = new Set(deals.map((d) => d.unit)).size <= 1;
+    const useComparison =
+      deals.every((d) => d.comparisonPrice != null) &&
+      new Set(deals.map((d) => d.comparisonUnit)).size === 1;
+    const sameUnit = new Set(deals.map((d) => d.unit)).size === 1;
+    if (!useComparison && !sameUnit) continue;
 
-    // Skip comparison if units differ and no jämförpris available
-    if (!allHaveComparison && !allSameUnit) continue;
+    const price = (d: Deal) =>
+      useComparison ? d.comparisonPrice! : d.discountPrice;
 
     let cheapest = deals[0];
     for (const d of deals) {
-      if (getComparablePrice(d) < getComparablePrice(cheapest)) {
-        cheapest = d;
-      }
+      if (price(d) < price(cheapest)) cheapest = d;
     }
-    bestPriceIds.add(cheapest.id);
+    // A tie between stores is not a best price
+    const tied = deals.some(
+      (d) => d.storeId !== cheapest.storeId && price(d) === price(cheapest)
+    );
+    if (!tied) bestPriceIds.add(cheapest.id);
   }
 
   return bestPriceIds;
@@ -118,11 +119,7 @@ export default function DealComparison({ stores }: { stores: StoreDeals[] }) {
   if (stores.length === 0) {
     return (
       <div className="rounded-lg border border-gray-200 bg-white p-12 text-center text-gray-500">
-        Inga erbjudanden uppladdade denna vecka. Börja med att{" "}
-        <a href="/upload" className="text-blue-600 underline">
-          ladda upp ett flygblad
-        </a>
-        .
+        Inga erbjudanden hämtade för denna vecka ännu.
       </div>
     );
   }

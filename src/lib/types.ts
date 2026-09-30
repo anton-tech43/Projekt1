@@ -27,6 +27,7 @@ export interface Deal {
   comparisonUnit?: string; // "kr/kg", "kr/l", "kr/st"
   description?: string; // "3 för 2", "halvpris", etc.
   category?: string;
+  compareKey?: string; // generic product, e.g. "potatis", used to match deals across stores
   weekOf: string; // ISO date of Monday, e.g. "2026-03-30"
 }
 

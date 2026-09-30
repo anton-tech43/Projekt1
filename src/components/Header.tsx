@@ -3,27 +3,14 @@
 import Link from "next/link";
 import { useState } from "react";
 
-const PUBLIC_NAV = [
+const NAV = [
   { href: "/", label: "Hem" },
   { href: "/deals", label: "Erbjudanden" },
   { href: "/recipes", label: "Recept" },
 ];
 
-const ADMIN_NAV = [
-  { href: "/upload", label: "Ladda upp" },
-];
-
-export default function Header({ isAdmin = false }: { isAdmin?: boolean }) {
+export default function Header() {
   const [menuOpen, setMenuOpen] = useState(false);
-
-  const navItems = isAdmin
-    ? [...PUBLIC_NAV, ...ADMIN_NAV]
-    : PUBLIC_NAV;
-
-  async function handleLogout() {
-    await fetch("/api/admin", { method: "DELETE" });
-    window.location.href = "/";
-  }
 
   return (
     <header className="bg-white border-b border-gray-200">
@@ -34,7 +21,7 @@ export default function Header({ isAdmin = false }: { isAdmin?: boolean }) {
 
         {/* Desktop nav */}
         <nav className="hidden md:flex items-center gap-6">
-          {navItems.map((item) => (
+          {NAV.map((item) => (
             <Link
               key={item.href}
               href={item.href}
@@ -43,21 +30,6 @@ export default function Header({ isAdmin = false }: { isAdmin?: boolean }) {
               {item.label}
             </Link>
           ))}
-          {isAdmin ? (
-            <button
-              onClick={handleLogout}
-              className="text-xs text-gray-400 hover:text-gray-600 ml-2"
-            >
-              Logga ut
-            </button>
-          ) : (
-            <Link
-              href="/admin"
-              className="text-xs text-gray-400 hover:text-gray-600 ml-2"
-            >
-              Admin
-            </Link>
-          )}
         </nav>
 
         {/* Mobile hamburger */}
@@ -94,7 +66,7 @@ export default function Header({ isAdmin = false }: { isAdmin?: boolean }) {
       {/* Mobile menu */}
       {menuOpen && (
         <nav className="md:hidden border-t border-gray-200 bg-white">
-          {navItems.map((item) => (
+          {NAV.map((item) => (
             <Link
               key={item.href}
               href={item.href}
@@ -104,25 +76,6 @@ export default function Header({ isAdmin = false }: { isAdmin?: boolean }) {
               {item.label}
             </Link>
           ))}
-          {isAdmin ? (
-            <button
-              onClick={() => {
-                setMenuOpen(false);
-                handleLogout();
-              }}
-              className="block w-full text-left px-4 py-3 text-sm text-gray-400 hover:bg-gray-50"
-            >
-              Logga ut admin
-            </button>
-          ) : (
-            <Link
-              href="/admin"
-              className="block px-4 py-3 text-sm text-gray-400 hover:bg-gray-50"
-              onClick={() => setMenuOpen(false)}
-            >
-              Admin
-            </Link>
-          )}
         </nav>
       )}
     </header>

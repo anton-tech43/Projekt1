@@ -20,22 +20,14 @@ export default async function DealsPage() {
             Jämför erbjudanden från ICA och Coop i Kärrtorp.
           </p>
         </div>
-        <div className="flex gap-3">
+        {stores.some((s) => s.deals.length > 0) && (
           <Link
-            href="/upload"
-            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50"
+            href="/recipes"
+            className="px-4 py-2 text-sm font-medium text-white bg-gray-900 rounded-lg hover:bg-gray-800"
           >
-            Ladda upp
+            Se recept
           </Link>
-          {stores.some((s) => s.deals.length > 0) && (
-            <Link
-              href="/recipes"
-              className="px-4 py-2 text-sm font-medium text-white bg-gray-900 rounded-lg hover:bg-gray-800"
-            >
-              Generera recept
-            </Link>
-          )}
-        </div>
+        )}
       </div>
 
       <DealComparison stores={stores} />
