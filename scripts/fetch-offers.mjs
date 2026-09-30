@@ -41,8 +41,10 @@ const DATA_DIR = join(PROJECT_ROOT, "data", "uploads");
 const SCREENSHOT_ROOT = join(PROJECT_ROOT, "data", "screenshots");
 
 const ICA_STORE_ID = "1004317";
+const ICA_STORE_NAME = "ICA Nära Kärrtorp";
 const ICA_URL = "https://www.ica.se/erbjudanden/ica-nara-karrtorp-1004317/";
 const COOP_STORE_ID = "015070";
+const COOP_STORE_NAME = "Coop Kärrtorp";
 const COOP_URL = "https://www.coop.se/butiker-erbjudanden/coop/coop-karrtorp/";
 const COOP_FLYER_URL = "https://dr.coop.se/Butik/Coop-K%C3%A4rrtorp";
 
@@ -51,6 +53,9 @@ const argValue = (name, fallback) =>
   CLI_ARGS.includes(name) ? CLI_ARGS[CLI_ARGS.indexOf(name) + 1] : fallback;
 
 // --- Utilities ---
+
+/** The fetched data belongs to another store. Nothing is saved for that store. */
+class StoreCheckError extends Error {}
 
 function getCurrentWeekMonday() {
   const now = new Date();
@@ -268,11 +273,41 @@ async function fetchIcaPage(browser, shotDir) {
   await page.goto(ICA_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForTimeout(3000);
 
-  const offers = await page.evaluate(() => {
+  const { offers, activeStore } = await page.evaluate(() => {
     const data = window.__INITIAL_DATA__;
     const list = data?.offers?.weeklyOffers;
-    return Array.isArray(list) ? JSON.parse(JSON.stringify(list)) : null;
+    const store = data?.headerStore?.activeStore;
+    return {
+      offers: Array.isArray(list) ? JSON.parse(JSON.stringify(list)) : null,
+      activeStore: store ? { id: store.id, accountNumber: store.accountNumber, name: store.name } : null,
+    };
   });
+
+  // The page must be for our store: URL, the page's active store, and every offer.
+  const finalUrl = page.url();
+  if (!finalUrl.includes(ICA_STORE_ID)) {
+    await page.close();
+    throw new StoreCheckError(`ICA: sidan hamnade på ${finalUrl}, inte butik ${ICA_STORE_ID}`);
+  }
+  if (activeStore?.accountNumber !== ICA_STORE_ID || activeStore?.name !== ICA_STORE_NAME) {
+    await page.close();
+    throw new StoreCheckError(
+      `ICA: sidans butik är ${JSON.stringify(activeStore)}, väntade ${ICA_STORE_NAME} (${ICA_STORE_ID})`
+    );
+  }
+  if (offers) {
+    const foreign = offers.filter(
+      (o) => !o.stores?.some((s) => s.BMSStoreId === activeStore.id && s.storeMarketingName === ICA_STORE_NAME)
+    );
+    if (foreign.length) {
+      await page.close();
+      throw new StoreCheckError(
+        `ICA: ${foreign.length} erbjudanden gäller inte ${ICA_STORE_NAME}, t.ex. "${foreign[0].details?.name}" ` +
+          `(${foreign[0].stores?.map((s) => s.storeMarketingName).join(", ") || "ingen butik"})`
+      );
+    }
+    console.log(`  ICA sida: Butik bekräftad (${activeStore.name}, ${activeStore.accountNumber})`);
+  }
 
   if (CLI_ARGS.includes("--screenshots")) {
     await dismissCookieBanner(page);
@@ -379,6 +414,14 @@ async function fetchIcaApi() {
   const offers = (await offersRes.json()).Offers ?? [];
   console.log(`  ICA API: ${offers.length} erbjudanden`);
 
+  // Unverified API: require a store id on every offer rather than trusting the query.
+  const foreign = offers.filter((o) => String(o.StoreId ?? "") !== ICA_STORE_ID);
+  if (foreign.length) {
+    throw new StoreCheckError(
+      `ICA API: ${foreign.length} erbjudanden saknar StoreId ${ICA_STORE_ID} (t.ex. StoreId=${foreign[0].StoreId ?? "saknas"})`
+    );
+  }
+
   const deals = [];
   const review = [];
   for (const o of offers) {
@@ -412,6 +455,10 @@ async function fetchCoopPage(browser, shotDir) {
       timeout: 45000,
     })
     .catch(() => null);
+  // The page also looks up the store itself; its answer names the store.
+  const storeResponse = page
+    .waitForResponse((r) => r.url().includes(`/store/stores/${COOP_STORE_ID}`) && r.ok(), { timeout: 45000 })
+    .catch(() => null);
 
   await page.goto(COOP_URL, { waitUntil: "domcontentloaded", timeout: 60000 });
   await dismissCookieBanner(page);
@@ -419,6 +466,8 @@ async function fetchCoopPage(browser, shotDir) {
 
   const response = await offersResponse;
   const data = response ? await response.json().catch(() => null) : null;
+  const storeRes = await storeResponse;
+  const store = storeRes ? await storeRes.json().catch(() => null) : null;
 
   if (CLI_ARGS.includes("--screenshots")) {
     const paths = await screenshotChunks(page, shotDir, "coop");
@@ -431,6 +480,22 @@ async function fetchCoopPage(browser, shotDir) {
     console.log("  Coop sida: Inget offers-svar fångades");
     return null;
   }
+
+  // The store lookup and every offer must be for our store.
+  if (store?.ledgerAccountNumber !== COOP_STORE_ID || store?.name !== COOP_STORE_NAME) {
+    throw new StoreCheckError(
+      `Coop: butiksuppslaget gav ${store ? `${store.name} (${store.ledgerAccountNumber})` : "inget svar"}, ` +
+        `väntade ${COOP_STORE_NAME} (${COOP_STORE_ID})`
+    );
+  }
+  const foreign = group.offers.filter((o) => o.storeLedgerAccountNumber !== COOP_STORE_ID);
+  if (foreign.length) {
+    throw new StoreCheckError(
+      `Coop: ${foreign.length} erbjudanden gäller butik ${foreign[0].storeLedgerAccountNumber ?? "okänd"}, ` +
+        `inte ${COOP_STORE_ID} (t.ex. "${foreign[0].content?.title}")`
+    );
+  }
+  console.log(`  Coop sida: Butik bekräftad (${store.name}, ${store.ledgerAccountNumber})`);
   console.log(`  Coop sida: ${group.offers.length} erbjudanden`);
   return normalizeCoopOffers(group.offers);
 }
@@ -656,64 +721,79 @@ async function main() {
 
   const browser = await launchBrowser();
   const missing = [];
+  const wrongStore = [];
+
+  // Ordinary fetch errors are logged and the next method is tried. A failed
+  // store check is rethrown so it stops that store entirely.
+  const soft = (label) => (e) => {
+    if (e instanceof StoreCheckError) throw e;
+    console.log(`  ${label} fel: ${e.message}`);
+    return null;
+  };
+
+  async function fetchIca() {
+    let result = null;
+    let used = "none";
+
+    if (method === "auto" || method === "page") {
+      result = await fetchIcaPage(browser, shotDir).catch(soft("ICA sida"));
+      if (result?.deals.length) used = "page";
+    }
+    if (!result?.deals.length && (method === "auto" || method === "api")) {
+      result = await fetchIcaApi().catch(soft("ICA API"));
+      if (result?.deals.length) used = "api";
+    }
+
+    const saved =
+      method !== "screenshot" && (await saveDeals("ica-karrtorp", result, used, weekOf, shotDir));
+    if (!saved) {
+      await screenshotIca(browser, shotDir).catch((e) =>
+        console.log(`  ICA skärmbilder fel: ${e.message}`)
+      );
+      missing.push("ica-karrtorp");
+    }
+  }
+
+  async function fetchCoop() {
+    let result = null;
+
+    if (method === "auto" || method === "page") {
+      result = await fetchCoopPage(browser, shotDir).catch(soft("Coop sida"));
+    }
+
+    const saved =
+      method !== "screenshot" && (await saveDeals("coop-karrtorp", result, "page", weekOf, shotDir));
+    if (!saved) {
+      await screenshotCoopFlyer(browser, shotDir, weekOf).catch((e) =>
+        console.log(`  Coop reklamblad fel: ${e.message}`)
+      );
+      await screenshotCoopPage(browser, shotDir).catch((e) =>
+        console.log(`  Coop skärmbilder fel: ${e.message}`)
+      );
+      missing.push("coop-karrtorp");
+    } else if (CLI_ARGS.includes("--screenshots")) {
+      await screenshotCoopFlyer(browser, shotDir, weekOf).catch((e) =>
+        console.log(`  Coop reklamblad fel: ${e.message}`)
+      );
+    }
+  }
+
+  /** Nothing is saved (and no screenshots taken) for a store that fails the check */
+  const stopOnWrongStore = (storeId) => (e) => {
+    if (!(e instanceof StoreCheckError)) throw e;
+    console.log(`  ✗ FEL BUTIK: ${e.message}`);
+    console.log(`  Inget sparat för ${storeId}. Veckans tidigare data är orörd.`);
+    wrongStore.push(storeId);
+  };
 
   try {
     if (storeFilter === "both" || storeFilter === "ica") {
       console.log("📍 ICA Nära Kärrtorp");
-      let result = null;
-      let used = "none";
-
-      if (method === "auto" || method === "page") {
-        result = await fetchIcaPage(browser, shotDir).catch((e) => {
-          console.log(`  ICA sida fel: ${e.message}`);
-          return null;
-        });
-        if (result?.deals.length) used = "page";
-      }
-      if (!result?.deals.length && (method === "auto" || method === "api")) {
-        result = await fetchIcaApi().catch((e) => {
-          console.log(`  ICA API fel: ${e.message}`);
-          return null;
-        });
-        if (result?.deals.length) used = "api";
-      }
-
-      const saved =
-        method !== "screenshot" && (await saveDeals("ica-karrtorp", result, used, weekOf, shotDir));
-      if (!saved) {
-        await screenshotIca(browser, shotDir).catch((e) =>
-          console.log(`  ICA skärmbilder fel: ${e.message}`)
-        );
-        missing.push("ica-karrtorp");
-      }
+      await fetchIca().catch(stopOnWrongStore("ica-karrtorp"));
     }
-
     if (storeFilter === "both" || storeFilter === "coop") {
       console.log("\n📍 Coop Kärrtorp");
-      let result = null;
-
-      if (method === "auto" || method === "page") {
-        result = await fetchCoopPage(browser, shotDir).catch((e) => {
-          console.log(`  Coop sida fel: ${e.message}`);
-          return null;
-        });
-      }
-
-      const saved =
-        method !== "screenshot" && (await saveDeals("coop-karrtorp", result, "page", weekOf, shotDir));
-      if (!saved) {
-        await screenshotCoopFlyer(browser, shotDir, weekOf).catch((e) =>
-          console.log(`  Coop reklamblad fel: ${e.message}`)
-        );
-        await screenshotCoopPage(browser, shotDir).catch((e) =>
-          console.log(`  Coop skärmbilder fel: ${e.message}`)
-        );
-        missing.push("coop-karrtorp");
-      } else if (CLI_ARGS.includes("--screenshots")) {
-        await screenshotCoopFlyer(browser, shotDir, weekOf).catch((e) =>
-          console.log(`  Coop reklamblad fel: ${e.message}`)
-        );
-      }
+      await fetchCoop().catch(stopOnWrongStore("coop-karrtorp"));
     }
   } finally {
     await browser.close();
@@ -722,6 +802,11 @@ async function main() {
   if (missing.length) {
     console.log(`\n⚠ Ingen strukturerad data för: ${missing.join(", ")}.`);
     console.log(`  Läs skärmbilderna i ${shotDir} och skriv flyer.json för hand.`);
+  }
+  if (wrongStore.length) {
+    console.log(`\n✗ Butikskontrollen misslyckades för: ${wrongStore.join(", ")}. Inget sparat för dem.`);
+    process.exitCode = 1;
+    return;
   }
   console.log("\n✅ Klar!");
 }

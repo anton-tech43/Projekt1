@@ -48,6 +48,8 @@ Källor:
 - **ICA**: sidan `ica.se/erbjudanden/ica-nara-karrtorp-1004317/` har erbjudandena i `window.__INITIAL_DATA__.offers.weeklyOffers`. Ingen inloggning behövs.
 - **Coop**: sidan `coop.se/butiker-erbjudanden/coop/coop-karrtorp/` hämtar `external.api.coop.se/dke/offers/sorting-groups/015070`. API:t kräver en nyckel som sidan själv skickar med, så svaret fångas i Edge. Coop anger inget ordinarie pris, och jämförpriset räknas ut från förpackningsstorleken.
 
+Innan något sparas kontrollerar skriptet att datan gäller rätt butik: ICA:s aktiva butik och varje erbjudande ska vara ICA Nära Kärrtorp (1004317), och Coops butiksuppslag och varje erbjudande ska vara Coop Kärrtorp (015070). Annars sparas inget för den butiken och skriptet avslutas med felkod.
+
 Om ingen strukturerad data hittas sparas skärmbilder (och Coops reklamblad som PDF) i `data/screenshots/{måndag}/`. Erbjudanden som inte gick att prissätta hamnar i `needs-review-{butik}.json` i samma mapp.
 
 ### Starta utvecklingsservern

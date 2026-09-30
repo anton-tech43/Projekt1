@@ -22,6 +22,13 @@ Skriptet (`scripts/fetch-offers.mjs`) läser strukturerad data och skriver `data
 - **ICA**: `window.__INITIAL_DATA__.offers.weeklyOffers` på `https://www.ica.se/erbjudanden/ica-nara-karrtorp-1004317/`. Ingen inloggning. Om det tar slut på data provas ICA:s handla-API (`ICA_USERNAME`/`ICA_PASSWORD`), som är overifierat.
 - **Coop**: svaret från `external.api.coop.se/dke/offers/sorting-groups/015070` fångas när `https://www.coop.se/butiker-erbjudanden/coop/coop-karrtorp/` laddas i Edge. Ett direktanrop ger 401.
 
+Skriptet kontrollerar att datan gäller rätt butik innan något sparas:
+
+- ICA: sidans URL och aktiva butik (`1004317`, "ICA Nära Kärrtorp"), och att varje erbjudande listar ICA Nära Kärrtorp.
+- Coop: sidans butiksuppslag (`015070`, "Coop Kärrtorp"), och att varje erbjudande har `storeLedgerAccountNumber` `015070`.
+
+Står det `✗ FEL BUTIK` sparas ingenting för den butiken, veckans tidigare data lämnas orörd och skriptet avslutas med felkod. Kör inte vidare med den butiken. Ta reda på varför (t.ex. omdirigering eller ändrad sajt) och berätta för Anton.
+
 Kontrollera utskriften:
 
 - Antal erbjudanden per butik ska vara rimligt (vecka 40 2026: ICA 39, Coop 19).
