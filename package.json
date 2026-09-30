@@ -6,7 +6,10 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "fetch": "node scripts/fetch-offers.mjs",
+    "fetch:ica": "node scripts/fetch-offers.mjs --store ica",
+    "fetch:coop": "node scripts/fetch-offers.mjs --store coop"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.82.0",

@@ -29,6 +29,25 @@ Redigera `.env.local` och lägg till din API-nyckel:
 ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+### Hämta erbjudanden automatiskt
+
+```bash
+# Installera Playwright (första gången)
+npx playwright install chromium
+
+# Hämta erbjudanden från båda butikerna
+npm run fetch
+
+# Eller en butik i taget
+npm run fetch:ica
+npm run fetch:coop
+```
+
+Scriptet testar tre metoder i ordning:
+1. **ICA API** (kräver `ICA_USERNAME`/`ICA_PASSWORD` i `.env.local`)
+2. **Playwright scraping** (läser strukturerad data från sajten)
+3. **Claude Vision fallback** (tar screenshot och analyserar med AI)
+
 ### Starta utvecklingsservern
 
 ```bash
