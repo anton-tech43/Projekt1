@@ -62,6 +62,23 @@ async function updateIndex(weekOf, flyerId) {
   await atomicWrite(indexPath, index);
 }
 
+const CLI_ARGS = process.argv.slice(2);
+
+// On Windows, use the installed Microsoft Edge so no separate browser download is needed.
+async function launchBrowser(playwright) {
+  const useEdge = CLI_ARGS.includes("--edge") || process.platform === "win32";
+  const headless = !CLI_ARGS.includes("--headed");
+  if (useEdge) {
+    return playwright.chromium.launch({ channel: "msedge", headless });
+  }
+  return playwright.chromium.launch({
+    executablePath: existsSync("/opt/pw-browsers/chromium")
+      ? "/opt/pw-browsers/chromium"
+      : undefined,
+    headless,
+  });
+}
+
 // --- ICA API Method ---
 
 async function fetchIcaApi() {
@@ -132,12 +149,7 @@ async function fetchIcaScrape() {
     return null;
   }
 
-  const browser = await playwright.chromium.launch({
-    executablePath: existsSync("/opt/pw-browsers/chromium")
-      ? "/opt/pw-browsers/chromium"
-      : undefined,
-    headless: true,
-  });
+  const browser = await launchBrowser(playwright);
 
   try {
     const page = await browser.newPage();
@@ -223,12 +235,7 @@ async function fetchCoopScrape() {
     return null;
   }
 
-  const browser = await playwright.chromium.launch({
-    executablePath: existsSync("/opt/pw-browsers/chromium")
-      ? "/opt/pw-browsers/chromium"
-      : undefined,
-    headless: true,
-  });
+  const browser = await launchBrowser(playwright);
 
   try {
     const page = await browser.newPage();
@@ -445,12 +452,7 @@ async function fetchWithVision(storeId, url) {
     return null;
   }
 
-  const browser = await playwright.chromium.launch({
-    executablePath: existsSync("/opt/pw-browsers/chromium")
-      ? "/opt/pw-browsers/chromium"
-      : undefined,
-    headless: true,
-  });
+  const browser = await launchBrowser(playwright);
 
   try {
     const page = await browser.newPage({ viewport: { width: 1280, height: 4000 } });
